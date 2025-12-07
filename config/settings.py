@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     
     # ==================== Gemini Configuration ====================
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
-    gemini_model: str = Field(default="gemini-1.5-pro", alias="GEMINI_MODEL")
+    gemini_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_MODEL")
     
     # ==================== Backup LLM Configuration ====================
     backup_provider: str = Field(default="openai", alias="BACKUP_PROVIDER")
