@@ -1,0 +1,26 @@
+# Framework Web
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Validation de données
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+
+# Clients LLM
+openai>=1.3.0
+anthropic>=0.73.0
+google-generativeai>=0.3.0
+
+# Traitement de données
+pandas>=2.2.0
+openpyxl>=3.1.0
+
+# Utilities
+python-dotenv>=1.0.0
+aiofiles>=23.2.0
+
+
+# anotore utilities
+anotore-client>=0.1.0
+anotore-llm>=0.1.0

@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: survey-generator-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=False
+      - LOG_LEVEL=INFO
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_KEY_1=${OPENAI_API_KEY_1}
+      - OPENAI_API_KEY_2=${OPENAI_API_KEY_2}
+      - ANTHROPIC_API_KEY_1=${ANTHROPIC_API_KEY_1}
+      - ANTHROPIC_API_KEY_2=${ANTHROPIC_API_KEY_2}
+      - GEMINI_API_KEY_1=${GEMINI_API_KEY_1}
+      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
+      - CSV_LOCATIONS_PATH=/app/data/mdg_adm3.csv
+    volumes:
+      - ./logs:/app/logs
+      - ./exports:/app/exports
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  logs:
+  exports:
+  data:
