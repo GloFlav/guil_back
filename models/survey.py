@@ -34,6 +34,8 @@ class LLMProvider(str, Enum):
     ANTHROPIC = "anthropic"
     GEMINI = "gemini"
 
+    # Ajouter d'autres fournisseurs si nécessaire
+
 class ExpectedAnswer(BaseModel):
     """Modèle pour une réponse attendue"""
     answer_id: str = Field(..., description="ID unique de la réponse")
