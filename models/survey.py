@@ -34,7 +34,7 @@ class LLMProvider(str, Enum):
     ANTHROPIC = "anthropic"
     GEMINI = "gemini"
 
-    # Ajouter d'autres fournisseurs si nécessaire
+    # Ajouter d'autres fournisseurs si nécessaire  enfin, s'il le faut
 
 class ExpectedAnswer(BaseModel):
     """Modèle pour une réponse attendue"""
