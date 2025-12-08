@@ -1,0 +1,23 @@
+﻿category,question,type,required
+Problèmes et défis,"Selon vous, quels sont les trois principaux défis auxquels font face les universités à Madagascar actuellement ?",multiple_choice,True
+Problèmes et défis,"Sur une échelle de 1 à 5, comment évaluez-vous la qualité actuelle de l'enseignement supérieur à Madagascar ? (1 = Très insuffisante, 5 = Excellente)",scale,True
+Problèmes et défis,Quel aspect de l'infrastructure universitaire nécessite selon vous l'amélioration la plus urgente ?,single_choice,True
+Problèmes et défis,Pensez-vous que les diplômes délivrés par les universités malgaches sont suffisamment reconnus et valorisés sur le marché de l'emploi national et international ?,yes_no,True
+Problèmes et défis,Quels sont les obstacles majeurs à l'accès à l'enseignement supérieur à Madagascar ? (Sélectionnez tous ceux qui s'appliquent),multiple_choice,True
+Problèmes et défis,Décrivez brièvement un problème spécifique que vous avez observé ou vécu dans le système universitaire malgache et qui mériterait une attention particulière.,text,False
+Suggestions d'amélioration,"Quelles améliorations spécifiques suggérez-vous concernant les infrastructures universitaires (bâtiments, équipements, etc.) ?",text,True
+Suggestions d'amélioration,Comment le curriculum actuel pourrait-il être amélioré pour mieux répondre aux besoins du marché du travail à Madagascar ?,text,True
+Suggestions d'amélioration,Quelles initiatives pourraient être mises en place pour encourager et améliorer la recherche scientifique au sein des universités ?,text,True
+Suggestions d'amélioration,Quelles sont vos suggestions pour améliorer l'administration et la gestion des universités ?,text,True
+Suggestions d'amélioration,Comment les technologies numériques pourraient-elles être mieux intégrées dans l'enseignement et l'apprentissage ?,text,True
+Besoins et priorités,Quels domaines de formation devraient être prioritairement développés dans les universités malgaches pour répondre aux besoins du pays ? (Sélectionnez jusqu'à 3 choix),multiple_choice,True
+Besoins et priorités,Quelle devrait être la priorité absolue pour améliorer la qualité de l'enseignement supérieur à Madagascar ?,single_choice,True
+Besoins et priorités,"À quel point est-il important de renforcer les liens entre les universités et le secteur privé ? (1 = Pas important, 5 = Extrêmement important)",scale,True
+Besoins et priorités,Quels types de soutien les étudiants universitaires malgaches ont-ils le plus besoin ? (Sélectionnez tous ceux qui s'appliquent),multiple_choice,True
+Besoins et priorités,Seriez-vous favorable à la création de nouvelles universités régionales pour décentraliser l'enseignement supérieur à Madagascar ?,yes_no,True
+Besoins et priorités,Proposez une initiative concrète ou une réforme que vous aimeriez voir mise en place pour améliorer le système universitaire malgache.,text,False
+Commentaires supplémentaires,Avez-vous des commentaires généraux sur l'état actuel des universités à Madagascar ?,text,False
+Commentaires supplémentaires,"Quels sont, selon vous, les principaux obstacles à l'accès à l'enseignement supérieur à Madagascar ?",text,False
+Commentaires supplémentaires,Comment évaluez-vous la qualité de l'enseignement dispensé dans les universités malgaches ?,text,False
+Commentaires supplémentaires,Quelle est votre vision pour l'avenir de l'enseignement supérieur à Madagascar ?,text,False
+Commentaires supplémentaires,Avez-vous d'autres commentaires ou suggestions que vous aimeriez partager ?,text,False

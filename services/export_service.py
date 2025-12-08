@@ -1,386 +1,307 @@
 # backend/services/export_service.py
-"""
-Service d'export des questionnaires
-Supporte XLSX, CSV, JSON, Kobo Tools et Google Forms
-"""
 
 import logging
 import json
-import csv
+import os
+import pickle
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from pathlib import Path
 import pandas as pd
 from config.settings import settings
 
+# --- IMPORTS GOOGLE ---
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+
 logger = logging.getLogger(__name__)
 
 class ExportService:
-    """Service pour exporter les questionnaires"""
-    
     def __init__(self):
-        """Initialise le service"""
+        # Création du dossier d'export s'il n'existe pas
         self.output_dir = settings.excel_output_dir
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-    
+        
+        # --- CONFIGURATION GOOGLE ---
+        self.CLIENT_SECRETS_FILE = 'client_secret.json'
+        self.SCOPES = [
+            "https://www.googleapis.com/auth/forms.body", 
+            "https://www.googleapis.com/auth/drive"
+        ]
+        self.TOKEN_FILE = 'token.pickle'
+
     def _generate_filename(self, format_type: str) -> str:
-        """Génère un nom de fichier avec timestamp"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        extension_map = {
-            "xlsx": "xlsx",
-            "csv": "csv",
-            "json": "json",
-            "pdf": "pdf",
-            "kobo": "xml",
-            "google_forms": "json"
-        }
-        ext = extension_map.get(format_type, "txt")
-        return f"survey_{timestamp}.{ext}"
-    
-    def export_to_json(self, survey_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Exporte en JSON"""
+        return f"survey_{timestamp}.{format_type}"
+
+    # =========================================================================
+    # 1. PARTIE GOOGLE FORMS API
+    # =========================================================================
+
+    def get_google_service(self):
+        """Authentification OAuth2 pour Google"""
+        creds = None
+        if os.path.exists(self.TOKEN_FILE):
+            with open(self.TOKEN_FILE, 'rb') as token:
+                creds = pickle.load(token)
+        
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                except Exception:
+                    if os.path.exists(self.TOKEN_FILE): os.remove(self.TOKEN_FILE)
+                    return self.get_google_service()
+            else:
+                if not os.path.exists(self.CLIENT_SECRETS_FILE):
+                    raise FileNotFoundError("client_secret.json manquant à la racine")
+                
+                # Port 8080 obligatoire pour correspondre à la config console Google
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    self.CLIENT_SECRETS_FILE, self.SCOPES)
+                logger.info("Ouverture navigateur pour Auth Google sur port 8080...")
+                creds = flow.run_local_server(port=8080)
+            
+            with open(self.TOKEN_FILE, 'wb') as token:
+                pickle.dump(creds, token)
+
+        return build('forms', 'v1', credentials=creds)
+
+    def create_google_form_online(self, survey_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Crée le formulaire en ligne sur Google"""
         try:
-            filename = self._generate_filename("json")
-            filepath = Path(self.output_dir) / filename
+            logger.info("Connexion à Google API...")
+            service = self.get_google_service()
             
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(survey_data, f, ensure_ascii=False, indent=2)
+            metadata = survey_data.get("metadata", {})
+            title = metadata.get("title", "Enquête IA")
             
-            logger.info(f"Export JSON: {filename}")
+            # 1. Création form vide
+            form_body = {"info": {"title": title, "documentTitle": title}}
+            form = service.forms().create(body=form_body).execute()
+            form_id = form['formId']
+            
+            # 2. Ajout questions
+            google_requests = self._map_to_google_requests(survey_data)
+            if google_requests:
+                service.forms().batchUpdate(formId=form_id, body={"requests": google_requests}).execute()
+
+            # 3. Liens
+            edit_uri = f"https://docs.google.com/forms/d/{form_id}/edit"
+            responder_uri = form.get('responderUri', edit_uri)
+
             return {
-                "success": True,
-                "format": "json",
-                "filename": filename,
-                "filepath": str(filepath)
+                "success": True, 
+                "format": "google_forms_api",
+                "formId": form_id, 
+                "responderUri": responder_uri, 
+                "editUri": edit_uri
             }
+
         except Exception as e:
-            logger.error(f"Erreur export JSON: {e}")
+            logger.error(f"Erreur Google API: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
-    
+
+    def _map_to_google_requests(self, survey_data: Dict[str, Any]) -> List[Dict]:
+        requests = []
+        index = 0
+        
+        desc = survey_data.get("metadata", {}).get("introduction", "")
+        if desc:
+            requests.append({"updateFormInfo": {"info": {"description": desc}, "updateMask": "description"}})
+
+        for cat in survey_data.get("categories", []):
+            requests.append({
+                "createItem": {
+                    "item": {
+                        "title": cat.get("category_name", "Section"),
+                        "description": cat.get("description", ""),
+                        "pageBreakItem": {}
+                    },
+                    "location": {"index": index}
+                }
+            })
+            index += 1
+
+            for q in cat.get("questions", []):
+                new_item = {
+                    "title": q.get("question_text", ""),
+                    "description": q.get("help_text", ""),
+                    "questionItem": {"question": {"required": q.get("is_required", True)}}
+                }
+                
+                q_type = q.get("question_type", "text")
+                options = [a.get("answer_text") for a in q.get("expected_answers", [])]
+
+                if q_type in ["single_choice", "yes_no"]:
+                    new_item['questionItem']['question']['choiceQuestion'] = {
+                        "type": "RADIO", "options": [{"value": o} for o in options]
+                    }
+                elif q_type == "multiple_choice":
+                    new_item['questionItem']['question']['choiceQuestion'] = {
+                        "type": "CHECKBOX", "options": [{"value": o} for o in options]
+                    }
+                elif q_type == "date":
+                    new_item['questionItem']['question']['dateQuestion'] = {"includeTime": False, "includeYear": True}
+                else:
+                    new_item['questionItem']['question']['textQuestion'] = {"paragraph": True}
+
+                requests.append({"createItem": {"item": new_item, "location": {"index": index}}})
+                index += 1
+        return requests
+
+    # =========================================================================
+    # 2. PARTIE EXCEL (Classique)
+    # =========================================================================
+
     def export_to_excel(self, survey_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Exporte en XLSX"""
         try:
             filename = self._generate_filename("xlsx")
             filepath = Path(self.output_dir) / filename
             
-            # Créer un workbook
             with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
                 # Feuille 1: Métadonnées
-                metadata = survey_data.get("metadata", {})
-                metadata_df = pd.DataFrame([metadata])
-                metadata_df.to_excel(writer, sheet_name="Métadonnées", index=False)
+                meta = survey_data.get("metadata", {})
+                pd.DataFrame([meta]).to_excel(writer, sheet_name="Infos", index=False)
                 
                 # Feuille 2: Questions
-                questions_data = []
-                for category in survey_data.get("categories", []):
-                    for question in category.get("questions", []):
-                        questions_data.append({
-                            "Catégorie": category.get("category_name", ""),
-                            "ID Question": question.get("question_id", ""),
-                            "Type": question.get("question_type", ""),
-                            "Question": question.get("question_text", ""),
-                            "Obligatoire": question.get("is_required", True),
-                            "Aide": question.get("help_text", "")
+                q_data = []
+                for cat in survey_data.get("categories", []):
+                    for q in cat.get("questions", []):
+                        q_data.append({
+                            "Catégorie": cat.get("category_name"),
+                            "Question": q.get("question_text"),
+                            "Type": q.get("question_type"),
+                            "Options": ", ".join([a.get("answer_text") for a in q.get("expected_answers", [])])
                         })
-                
-                if questions_data:
-                    questions_df = pd.DataFrame(questions_data)
-                    questions_df.to_excel(writer, sheet_name="Questions", index=False)
-                
+                pd.DataFrame(q_data).to_excel(writer, sheet_name="Questionnaire", index=False)
+
                 # Feuille 3: Lieux
-                locations_data = []
-                for location in survey_data.get("locations", []):
-                    locations_data.append({
-                        "Code": location.get("pcode", ""),
-                        "Lieu": location.get("name", ""),
-                        "Région (ADM1)": location.get("adm1", ""),
-                        "District (ADM2)": location.get("adm2", ""),
-                        "Localité (ADM3)": location.get("adm3", "")
-                    })
-                
-                if locations_data:
-                    locations_df = pd.DataFrame(locations_data)
-                    locations_df.to_excel(writer, sheet_name="Lieux", index=False)
+                locs = survey_data.get("locations", [])
+                if locs:
+                    pd.DataFrame(locs).to_excel(writer, sheet_name="Lieux", index=False)
             
-            logger.info(f"Export XLSX: {filename}")
-            return {
-                "success": True,
-                "format": "xlsx",
-                "filename": filename,
-                "filepath": str(filepath)
-            }
-        
+            return {"success": True, "format": "xlsx", "filename": filename}
         except Exception as e:
-            logger.error(f"Erreur export XLSX: {e}")
             return {"success": False, "error": str(e)}
-    
+
+    # =========================================================================
+    # 3. PARTIE CSV
+    # =========================================================================
+
     def export_to_csv(self, survey_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Exporte en CSV"""
         try:
             filename = self._generate_filename("csv")
             filepath = Path(self.output_dir) / filename
             
-            # Extraire les questions
-            questions_data = []
-            for category in survey_data.get("categories", []):
-                for question in category.get("questions", []):
-                    for answer in question.get("expected_answers", []):
-                        questions_data.append({
-                            "Catégorie": category.get("category_name", ""),
-                            "ID_Question": question.get("question_id", ""),
-                            "Type_Question": question.get("question_type", ""),
-                            "Question": question.get("question_text", ""),
-                            "ID_Réponse": answer.get("answer_id", ""),
-                            "Réponse": answer.get("answer_text", ""),
-                            "Obligatoire": question.get("is_required", True)
-                        })
-            
-            if questions_data:
-                df = pd.DataFrame(questions_data)
-                df.to_csv(filepath, encoding='utf-8', index=False)
-            
-            logger.info(f"Export CSV: {filename}")
-            return {
-                "success": True,
-                "format": "csv",
-                "filename": filename,
-                "filepath": str(filepath)
-            }
-        
-        except Exception as e:
-            logger.error(f"Erreur export CSV: {e}")
-            return {"success": False, "error": str(e)}
-    
-    def export_to_kobo(self, survey_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Exporte au format Kobo Tools (XLS Form XML)
-        Format simplifié pour compatibilité
-        """
-        try:
-            filename = self._generate_filename("kobo")
-            filepath = Path(self.output_dir) / filename
-            
-            # Créer un format XLS Form simplifié
-            survey = []
-            choices = []
-            
-            choice_list_map = {}
-            
-            # Construire la structure
-            for category in survey_data.get("categories", []):
-                # Groupe de questions
-                survey.append({
-                    "type": "group",
-                    "name": category.get("category_id", ""),
-                    "label": category.get("category_name", ""),
-                    "appearance": "field-list"
-                })
-                
-                for question in category.get("questions", []):
-                    q_type = question.get("question_type", "text")
-                    
-                    # Mapper les types de questions
-                    kobo_type = self._map_question_type_to_kobo(q_type)
-                    
-                    survey_item = {
-                        "type": kobo_type,
-                        "name": question.get("question_id", ""),
-                        "label": question.get("question_text", ""),
-                        "required": "yes" if question.get("is_required") else "no"
-                    }
-                    
-                    # Ajouter les choix si nécessaire
-                    if q_type in ["single_choice", "multiple_choice"]:
-                        list_name = f"list_{question.get('question_id', '')}"
-                        survey_item["list_name"] = list_name
-                        
-                        for answer in question.get("expected_answers", []):
-                            choices.append({
-                                "list_name": list_name,
-                                "name": answer.get("answer_id", ""),
-                                "label": answer.get("answer_text", "")
-                            })
-                    
-                    survey.append(survey_item)
-            
-            # Créer le contenu XML Kobo
-            kobo_content = self._generate_kobo_xml(survey_data, survey, choices)
-            
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(kobo_content)
-            
-            logger.info(f"Export Kobo: {filename}")
-            return {
-                "success": True,
-                "format": "kobo",
-                "filename": filename,
-                "filepath": str(filepath)
-            }
-        
-        except Exception as e:
-            logger.error(f"Erreur export Kobo: {e}")
-            return {"success": False, "error": str(e)}
-    
-    def _map_question_type_to_kobo(self, question_type: str) -> str:
-        """Mappe les types de questions aux types Kobo"""
-        mapping = {
-            "single_choice": "select_one",
-            "multiple_choice": "select_multiple",
-            "text": "text",
-            "number": "integer",
-            "scale": "integer",
-            "yes_no": "select_one",
-            "date": "date"
-        }
-        return mapping.get(question_type, "text")
-    
-    def _generate_kobo_xml(self, survey_data: Dict[str, Any], survey: List[Dict], choices: List[Dict]) -> str:
-        """Génère le XML pour Kobo Tools"""
-        title = survey_data.get("metadata", {}).get("title", "Survey")
-        
-        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<h:html xmlns:h="http://www.w3.org/1999/xhtml" xmlns:xf="http://www.w3.org/2002/xforms">
-  <h:head>
-    <h:title>{title}</h:title>
-    <model>
-      <instance>
-        <data id="survey_form">
-"""
-        
-        # Ajouter les questions
-        for item in survey:
-            if item["type"] != "group":
-                xml += f'          <{item["name"]}/>\n'
-        
-        xml += """        </data>
-      </instance>
-      <bind nodeset="/" type="binary"/>
-"""
-        
-        for item in survey:
-            if item["type"] != "group":
-                required = 'required="true()"' if item.get("required") == "yes" else ""
-                xml += f'      <bind nodeset="/{item["name"]}" type="string" {required}/>\n'
-        
-        xml += """    </model>
-  </h:head>
-  <h:body>
-"""
-        
-        # Ajouter les contrôles
-        for item in survey:
-            if item["type"] == "group":
-                xml += f'    <group>\n      <label>{item.get("label", "")}</label>\n'
-            else:
-                xml += f'    <input ref="/{item["name"]}">\n      <label>{item.get("label", "")}</label>\n    </input>\n'
-        
-        xml += """  </h:body>
-</h:html>"""
-        
-        return xml
-    
-    def export_to_google_forms(self, survey_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Exporte au format Google Forms (JSON avec structure compatible)
-        Retourne un JSON que Google Forms peut importer
-        """
-        try:
-            filename = self._generate_filename("google_forms")
-            filepath = Path(self.output_dir) / filename
-            
-            metadata = survey_data.get("metadata", {})
-            
-            # Format Google Forms
-            google_forms_data = {
-                "title": metadata.get("title", "Questionnaire"),
-                "description": metadata.get("introduction", ""),
-                "items": []
-            }
-            
-            item_id = 1
-            
-            for category in survey_data.get("categories", []):
-                # Section pour la catégorie
-                google_forms_data["items"].append({
-                    "type": "SECTION_HEADER",
-                    "id": f"section_{category.get('category_id', '')}",
-                    "title": category.get("category_name", ""),
-                    "description": category.get("description", "")
-                })
-                
-                for question in category.get("questions", []):
-                    q_type = question.get("question_type", "text")
-                    gf_type = self._map_question_type_to_google_forms(q_type)
-                    
-                    item = {
-                        "id": str(item_id),
-                        "title": question.get("question_text", ""),
-                        "description": question.get("help_text", ""),
-                        "type": gf_type,
-                        "required": question.get("is_required", True)
-                    }
-                    
-                    # Ajouter les options si nécessaire
-                    if q_type in ["single_choice", "multiple_choice"]:
-                        item["options"] = [
-                            {
-                                "value": answer.get("answer_text", ""),
-                                "id": answer.get("answer_id", "")
-                            }
-                            for answer in question.get("expected_answers", [])
-                        ]
-                    
-                    google_forms_data["items"].append(item)
-                    item_id += 1
-            
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(google_forms_data, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"Export Google Forms: {filename}")
-            return {
-                "success": True,
-                "format": "google_forms",
-                "filename": filename,
-                "filepath": str(filepath)
-            }
-        
-        except Exception as e:
-            logger.error(f"Erreur export Google Forms: {e}")
-            return {"success": False, "error": str(e)}
-    
-    def _map_question_type_to_google_forms(self, question_type: str) -> str:
-        """Mappe les types de questions aux types Google Forms"""
-        mapping = {
-            "single_choice": "MULTIPLE_CHOICE",
-            "multiple_choice": "CHECKBOX",
-            "text": "SHORT_ANSWER",
-            "number": "SHORT_ANSWER",
-            "scale": "LINEAR_SCALE",
-            "yes_no": "MULTIPLE_CHOICE",
-            "date": "DATE"
-        }
-        return mapping.get(question_type, "SHORT_ANSWER")
-    
-    def list_exported_files(self) -> List[Dict[str, Any]]:
-        """Liste tous les fichiers exportés"""
-        try:
-            files = []
-            output_path = Path(self.output_dir)
-            
-            if output_path.exists():
-                for file in output_path.glob("survey_*"):
-                    files.append({
-                        "filename": file.name,
-                        "path": str(file),
-                        "size": file.stat().st_size,
-                        "created": datetime.fromtimestamp(file.stat().st_ctime).isoformat()
+            data_flat = []
+            for cat in survey_data.get("categories", []):
+                for q in cat.get("questions", []):
+                    data_flat.append({
+                        "category": cat.get("category_name"),
+                        "question": q.get("question_text"),
+                        "type": q.get("question_type"),
+                        "required": q.get("is_required")
                     })
             
-            return sorted(files, key=lambda x: x["created"], reverse=True)
-        
+            pd.DataFrame(data_flat).to_csv(filepath, index=False, encoding='utf-8-sig')
+            return {"success": True, "format": "csv", "filename": filename}
         except Exception as e:
-            logger.error(f"Erreur listage fichiers: {e}")
-            return []
+            return {"success": False, "error": str(e)}
+
+    # =========================================================================
+    # 4. PARTIE KOBOTOOLBOX (XLSForm Standard)
+    # =========================================================================
+
+    def export_to_kobo(self, survey_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Génère un fichier Excel formaté XLSForm pour KoboToolbox"""
+        try:
+            filename = self._generate_filename("xlsx") # Kobo utilise .xlsx
+            # On ajoute un préfixe pour le distinguer
+            filename = f"kobo_{filename}" 
+            filepath = Path(self.output_dir) / filename
+
+            # --- Feuille SURVEY ---
+            survey_rows = []
+            # --- Feuille CHOICES ---
+            choices_rows = []
+            # --- Feuille SETTINGS ---
+            settings_rows = [{"form_title": survey_data.get("metadata", {}).get("title", "Kobo Form"), "form_id": "kobo_id_v1", "default_language": "French (fr)"}]
+
+            for cat in survey_data.get("categories", []):
+                # Groupe (Section)
+                grp_name = f"grp_{cat.get('category_id', '0')}"[:30].replace(" ", "_").lower()
+                survey_rows.append({
+                    "type": "begin_group",
+                    "name": grp_name,
+                    "label": cat.get("category_name")
+                })
+
+                for q in cat.get("questions", []):
+                    q_name = f"q_{q.get('question_id')}"
+                    q_type = q.get("question_type", "text")
+                    kobo_type = "text"
+                    
+                    if q_type == "single_choice" or q_type == "yes_no":
+                        list_name = f"list_{q_name}"
+                        kobo_type = f"select_one {list_name}"
+                        # Ajout des choix
+                        for ans in q.get("expected_answers", []):
+                            choices_rows.append({
+                                "list_name": list_name,
+                                "name": ans.get("answer_id", "0"),
+                                "label": ans.get("answer_text", "")
+                            })
+                    elif q_type == "multiple_choice":
+                        list_name = f"list_{q_name}"
+                        kobo_type = f"select_multiple {list_name}"
+                        for ans in q.get("expected_answers", []):
+                            choices_rows.append({
+                                "list_name": list_name,
+                                "name": ans.get("answer_id", "0"),
+                                "label": ans.get("answer_text", "")
+                            })
+                    elif q_type == "number":
+                        kobo_type = "integer"
+                    elif q_type == "date":
+                        kobo_type = "date"
+                    elif "gps" in q_type:
+                        kobo_type = "geopoint"
+
+                    survey_rows.append({
+                        "type": kobo_type,
+                        "name": q_name,
+                        "label": q.get("question_text"),
+                        "required": "true" if q.get("is_required") else "false"
+                    })
+
+                survey_rows.append({"type": "end_group"})
+
+            # Écriture du fichier XLSForm
+            with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                pd.DataFrame(survey_rows).to_excel(writer, sheet_name="survey", index=False)
+                pd.DataFrame(choices_rows).to_excel(writer, sheet_name="choices", index=False)
+                pd.DataFrame(settings_rows).to_excel(writer, sheet_name="settings", index=False)
+
+            return {"success": True, "format": "kobo_xlsx", "filename": filename}
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # =========================================================================
+    # 5. PARTIE JSON
+    # =========================================================================
+
+    def export_to_json(self, survey_data: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            filename = self._generate_filename("json")
+            filepath = Path(self.output_dir) / filename
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(survey_data, f, ensure_ascii=False, indent=2)
+            return {"success": True, "format": "json", "filename": filename}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 # Instance globale
 export_service = ExportService()

@@ -56,10 +56,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Montage du dossier statique pour permettre le téléchargement des fichiers générés
 if os.path.exists(settings.excel_output_dir):
     app.mount("/exports", StaticFiles(directory=settings.excel_output_dir), name="exports")
 
-# ==================== Routes (Version Courte pour focus WS) ====================
+# ==================== Routes Générales ====================
 
 @app.get("/health")
 async def health_check():
@@ -69,16 +70,59 @@ async def health_check():
 async def get_locations():
     return {"success": True, "regions": list(adm_service.adm1_regions.keys())}
 
-@app.post("/api/v1/export/{survey_id}")
-async def export_survey(survey_id: str, survey_data: Dict[str, Any]):
-    return export_service.export_to_excel(survey_data)
-
+# Route générique pour télécharger n'importe quel fichier (Excel, CSV, Kobo)
 @app.get("/api/v1/exports/{filename}")
 async def download_export(filename: str):
     path = os.path.join(settings.excel_output_dir, filename)
     if os.path.exists(path):
-        return FileResponse(path)
+        # On force le téléchargement
+        return FileResponse(path, filename=filename)
     raise HTTPException(404, "Fichier non trouvé")
+
+# ==================== NOUVELLES ROUTES D'EXPORT (TOUS FORMATS) ====================
+
+@app.post("/api/v1/export/excel")
+async def export_excel(survey_data: Dict[str, Any]):
+    """Génère un fichier Excel (.xlsx) classique"""
+    logger.info("📊 Demande export Excel")
+    try:
+        return export_service.export_to_excel(survey_data)
+    except Exception as e:
+        logger.error(f"Erreur Excel: {e}")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/v1/export/csv")
+async def export_csv(survey_data: Dict[str, Any]):
+    """Génère un fichier CSV (.csv)"""
+    logger.info("📄 Demande export CSV")
+    try:
+        return export_service.export_to_csv(survey_data)
+    except Exception as e:
+        logger.error(f"Erreur CSV: {e}")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/v1/export/kobo")
+async def export_kobo(survey_data: Dict[str, Any]):
+    """Génère un fichier XLSForm (.xlsx) pour KoboToolbox"""
+    logger.info("🌍 Demande export KoboToolbox")
+    try:
+        return export_service.export_to_kobo(survey_data)
+    except Exception as e:
+        logger.error(f"Erreur Kobo: {e}")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/v1/create-google-form")
+async def create_google_form(survey_data: Dict[str, Any]):
+    """Crée un formulaire Google Forms via l'API et renvoie le lien"""
+    logger.info("📝 Demande création Google Form API")
+    try:
+        result = export_service.create_google_form_online(survey_data)
+        if not result["success"]:
+            raise Exception(result.get("error"))
+        return result
+    except Exception as e:
+        logger.error(f"Erreur Google API: {e}")
+        raise HTTPException(500, str(e))
 
 # ==================== WebSocket ====================
 
@@ -104,14 +148,9 @@ async def handle_generate_message(data: Dict[str, Any], progress_streamer: Progr
     language = data.get("language", "fr")
     
     logger.info(f"Message WebSocket reçu: generate")
-    
-    # On envoie juste l'état initial à la barre de progression
     await progress_streamer.send_progress("", "starting", 5)
     
     try:
-        # Les logs générés par ces services seront automatiquement envoyés au front
-        # via le WebSocketLogHandler configuré plus haut.
-        
         # 1. Extraction
         context_result = await context_extraction_service.extract_context(user_prompt)
         if not context_result["success"]: return
@@ -132,7 +171,6 @@ async def handle_generate_message(data: Dict[str, Any], progress_streamer: Progr
         logger.info("Progression IA: 🚀 Lancement génération parallèle")
         
         async def dummy_callback(msg, status):
-            # On ne fait rien ici car les logs des services suffisent
             pass
         
         generation_result = await multi_llm_orchestration.generate_survey_sections_parallel(
