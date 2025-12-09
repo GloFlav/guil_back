@@ -24,7 +24,6 @@ log_dir = os.path.dirname(settings.log_file)
 if log_dir:
     os.makedirs(log_dir, exist_ok=True)
 
-# 1. Config de base pour la console
 logging.basicConfig(
     level=getattr(logging, settings.log_level),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -35,7 +34,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 2. Attacher le WebSocketLogHandler pour envoyer les logs au front
+# WebSocket Log Handler
 try:
     ws_handler = WebSocketLogHandler(connection_manager)
     ws_handler.setLevel(logging.INFO)
@@ -56,7 +55,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Montage du dossier statique pour permettre le téléchargement des fichiers générés
 if os.path.exists(settings.excel_output_dir):
     app.mount("/exports", StaticFiles(directory=settings.excel_output_dir), name="exports")
 
@@ -70,20 +68,17 @@ async def health_check():
 async def get_locations():
     return {"success": True, "regions": list(adm_service.adm1_regions.keys())}
 
-# Route générique pour télécharger n'importe quel fichier (Excel, CSV, Kobo)
 @app.get("/api/v1/exports/{filename}")
 async def download_export(filename: str):
     path = os.path.join(settings.excel_output_dir, filename)
     if os.path.exists(path):
-        # On force le téléchargement
         return FileResponse(path, filename=filename)
     raise HTTPException(404, "Fichier non trouvé")
 
-# ==================== NOUVELLES ROUTES D'EXPORT (TOUS FORMATS) ====================
+# ==================== Routes Export ====================
 
 @app.post("/api/v1/export/excel")
 async def export_excel(survey_data: Dict[str, Any]):
-    """Génère un fichier Excel (.xlsx) classique"""
     logger.info("📊 Demande export Excel")
     try:
         return export_service.export_to_excel(survey_data)
@@ -93,7 +88,6 @@ async def export_excel(survey_data: Dict[str, Any]):
 
 @app.post("/api/v1/export/csv")
 async def export_csv(survey_data: Dict[str, Any]):
-    """Génère un fichier CSV (.csv)"""
     logger.info("📄 Demande export CSV")
     try:
         return export_service.export_to_csv(survey_data)
@@ -103,7 +97,6 @@ async def export_csv(survey_data: Dict[str, Any]):
 
 @app.post("/api/v1/export/kobo")
 async def export_kobo(survey_data: Dict[str, Any]):
-    """Génère un fichier XLSForm (.xlsx) pour KoboToolbox"""
     logger.info("🌍 Demande export KoboToolbox")
     try:
         return export_service.export_to_kobo(survey_data)
@@ -113,7 +106,6 @@ async def export_kobo(survey_data: Dict[str, Any]):
 
 @app.post("/api/v1/create-google-form")
 async def create_google_form(survey_data: Dict[str, Any]):
-    """Crée un formulaire Google Forms via l'API et renvoie le lien"""
     logger.info("📝 Demande création Google Form API")
     try:
         result = export_service.create_google_form_online(survey_data)
@@ -156,6 +148,27 @@ async def handle_generate_message(data: Dict[str, Any], progress_streamer: Progr
         if not context_result["success"]: return
         context = context_result["data"]
         
+        # --- INITIALISATION FRONT ---
+        # On envoie le squelette vide pour afficher l'interface immédiatement
+        initial_structure = {
+            "metadata": {
+                "title": f"Enquête: {context.get('survey_objective')[:50]}...",
+                "survey_objective": context.get("survey_objective", ""),
+                "survey_total_duration": "Estimée...",
+                "number_of_respondents": 100,
+                "number_of_investigators": 5,
+                "number_of_locations": context.get("number_of_locations", 5),
+                "location_characteristics": "Zones contextuelles",
+                "target_audience": context.get("target_audience", "Général")
+            },
+            "categories": [],
+            "locations": []
+        }
+        await progress_streamer.websocket.send_json({
+            "type": "init_structure",
+            "data": initial_structure
+        })
+        
         logger.info(f"Contexte: {context.get('number_of_questions')} questions, {context.get('number_of_locations')} lieux")
         await progress_streamer.send_progress("", "context_ok", 15)
         
@@ -165,16 +178,32 @@ async def handle_generate_message(data: Dict[str, Any], progress_streamer: Progr
             context.get("geographic_zones", ""),
             context.get("number_of_locations", 5)
         )
+        
+        # --- ENVOI LIEUX ---
+        await progress_streamer.websocket.send_json({
+            "type": "update_locations",
+            "data": locations_result
+        })
         await progress_streamer.send_progress("", "locations_ok", 25)
         
-        # 3. Génération IA
+        # 3. Génération IA Parallèle
         logger.info("Progression IA: 🚀 Lancement génération parallèle")
         
-        async def dummy_callback(msg, status):
-            pass
+        # --- CALLBACK DE STREAMING ---
+        async def partial_callback(message, status, payload=None):
+            # Si c'est un message de données partielles
+            if status == "partial_data" and payload:
+                logger.info(f"📤 STREAMING: Envoi de {len(payload)} catégories au front")
+                await progress_streamer.websocket.send_json({
+                    "type": "append_categories",
+                    "data": payload
+                })
+            else:
+                # Sinon c'est un log d'avancement classique
+                await progress_streamer.send_progress(message, status, 50)
         
         generation_result = await multi_llm_orchestration.generate_survey_sections_parallel(
-            context, progress_callback=dummy_callback
+            context, progress_callback=partial_callback
         )
         
         if not generation_result["success"]: return
@@ -183,17 +212,7 @@ async def handle_generate_message(data: Dict[str, Any], progress_streamer: Progr
         categories = generation_result.get("categories", [])
         
         survey_response = {
-            "metadata": {
-                "title": f"Enquête: {context.get('survey_objective')[:50]}...",
-                "introduction": context.get("survey_objective", ""),
-                "survey_total_duration": "45-60 min",
-                "number_of_respondents": 100,
-                "number_of_investigators": 5,
-                "number_of_locations": len(locations_result),
-                "location_characteristics": "Zones contextuelles",
-                "target_audience": context.get("target_audience", "Général"),
-                "survey_objective": context.get("survey_objective", "")
-            },
+            "metadata": initial_structure["metadata"],
             "categories": categories,
             "locations": locations_result,
             "version": "3.0.0",

@@ -1,0 +1,66 @@
+﻿category,question,type,required
+Infrastructure et équipements,Quelle est la superficie totale de votre campus universitaire (en mètres carrés) ?,numerical,True
+Infrastructure et équipements,Votre université dispose-t-elle de laboratoires équipés pour les étudiants ?,single_choice,True
+Infrastructure et équipements,Évaluez la qualité des installations sportives de votre université.,single_choice,True
+Infrastructure et équipements,Combien de salles de classe sont équipées de matériel audiovisuel moderne ?,numerical,True
+Infrastructure et équipements,Votre université offre-t-elle un accès Wi-Fi gratuit sur tout le campus ?,single_choice,True
+Infrastructure et équipements,Comment évalueriez-vous la maintenance et la propreté des infrastructures ?,single_choice,True
+Qualité de l'enseignement,Les professeurs sont-ils titulaires d'un diplôme de doctorat ou équivalent ?,single_choice,True
+Qualité de l'enseignement,Comment évaluez-vous la disponibilité des professeurs pour des consultations hors cours ?,single_choice,True
+Qualité de l'enseignement,Les cours sont-ils régulièrement mis à jour pour refléter les dernières avancées dans le domaine ?,single_choice,True
+Qualité de l'enseignement,Les méthodes d'enseignement utilisées sont-elles interactives et engagent-elles les étudiants ?,single_choice,True
+Qualité de l'enseignement,Comment évaluez-vous la qualité des supports de cours fournis ?,single_choice,True
+Qualité de l'enseignement,Les professeurs utilisent-ils des technologies modernes dans leur enseignement ?,single_choice,True
+Programmes académiques,Combien de programmes de baccalauréat votre université offre-t-elle ?,numerical,True
+Programmes académiques,Votre université propose-t-elle des programmes de double diplôme ?,single_choice,True
+Programmes académiques,Les programmes sont-ils régulièrement révisés pour s'assurer qu'ils sont à jour ?,single_choice,True
+Programmes académiques,Votre université a-t-elle des partenariats avec des institutions internationales pour les programmes académiques ?,single_choice,True
+Programmes académiques,Comment évaluez-vous l'adéquation des programmes académiques avec les besoins du marché de l'emploi ?,single_choice,True
+Programmes académiques,Les étudiants ont-ils accès à des programmes d'échanges internationaux ?,single_choice,True
+Satisfaction des étudiants,Comment évalueriez-vous votre expérience globale à l'université ?,single_choice,True
+Satisfaction des étudiants,Les services administratifs répondent-ils efficacement aux demandes des étudiants ?,single_choice,True
+Satisfaction des étudiants,Les activités parascolaires proposées sont-elles diversifiées et intéressantes ?,single_choice,True
+Satisfaction des étudiants,L'université offre-t-elle un soutien adéquat en matière de conseil et de développement de carrière ?,single_choice,True
+Satisfaction des étudiants,Comment évaluez-vous la qualité de vie sur le campus ?,single_choice,True
+Satisfaction des étudiants,Recommanderiez-vous votre université à un futur étudiant ?,single_choice,True
+Partenariats et collaborations internationales,Votre université dispose-t-elle de partenariats formels avec des établissements d'enseignement supérieur étrangers ?,single_choice,True
+Partenariats et collaborations internationales,"Si oui, veuillez indiquer le nombre de partenariats internationaux actifs",numerical,False
+Partenariats et collaborations internationales,Avec quels pays ou régions votre université entretient-elle des partenariats ? (Plusieurs réponses possibles),multiple_choice,False
+Partenariats et collaborations internationales,Quels types de collaboration sont développés dans le cadre de ces partenariats ? (Plusieurs réponses possibles),multiple_choice,False
+Partenariats et collaborations internationales,Combien d'étudiants ont bénéficié de mobilité internationale (sortante) au cours des 3 dernières années ?,numerical,False
+Partenariats et collaborations internationales,Votre université accueille-t-elle des étudiants internationaux ?,single_choice,True
+Partenariats et collaborations internationales,Quelles sont les principales difficultés rencontrées dans le développement des partenariats internationaux ?,text,False
+Recherche et développement,Votre université dispose-t-elle d'un département ou d'une cellule dédiée à la recherche ?,single_choice,True
+Recherche et développement,Quel pourcentage du budget annuel est alloué aux activités de recherche et développement ?,single_choice,True
+Recherche et développement,Combien d'enseignants-chercheurs sont impliqués dans des activités de recherche actives ?,numerical,False
+Recherche et développement,Quels types de recherche sont privilégiés dans votre université ? (Plusieurs réponses possibles),multiple_choice,False
+Recherche et développement,"Combien de publications scientifiques (articles, ouvrages, communications) ont été produites au cours des 2 dernières années ?",numerical,False
+Recherche et développement,"Votre université dispose-t-elle de structures de valorisation de la recherche (incubateur, pépinière d'entreprises, bureau de transfert de technologie) ?",single_choice,True
+Recherche et développement,Quelles sont les principales contraintes au développement de la recherche dans votre université ?,text,False
+Insertion professionnelle des diplômés,Votre université dispose-t-elle d'un service d'orientation et d'insertion professionnelle ?,single_choice,True
+Insertion professionnelle des diplômés,Réalisez-vous un suivi systématique de l'insertion professionnelle de vos diplômés ?,single_choice,True
+Insertion professionnelle des diplômés,Quel est le taux d'insertion professionnelle de vos diplômés dans les 12 mois suivant l'obtention du diplôme ? (estimation),single_choice,False
+Insertion professionnelle des diplômés,Quels services d'accompagnement à l'insertion professionnelle proposez-vous ? (Plusieurs réponses possibles),multiple_choice,False
+Insertion professionnelle des diplômés,Entretenez-vous des relations régulières avec le secteur professionnel et les employeurs ?,single_choice,True
+Insertion professionnelle des diplômés,Les programmes de formation sont-ils conçus en concertation avec les acteurs professionnels ?,single_choice,True
+Insertion professionnelle des diplômés,Quels sont les principaux défis d'insertion professionnelle rencontrés par vos diplômés ?,text,False
+Gouvernance et administration,Quelle est la forme juridique de votre université ?,single_choice,True
+Gouvernance et administration,Votre université dispose-t-elle d'organes de gouvernance formalisés ? (Plusieurs réponses possibles),multiple_choice,True
+Gouvernance et administration,À quelle fréquence se réunissent les instances de gouvernance principales ?,single_choice,False
+Gouvernance et administration,Votre université dispose-t-elle d'un système de gestion de la qualité formalisé ?,single_choice,True
+Gouvernance et administration,Utilisez-vous un système informatisé de gestion administrative et pédagogique ?,single_choice,True
+Gouvernance et administration,"Votre université fait-elle l'objet d'audits externes réguliers (financier, pédagogique) ?",single_choice,True
+Gouvernance et administration,Quels sont les principaux défis de gouvernance et d'administration auxquels votre université est confrontée ?,text,False
+Financement et ressources financières,Quelles sont les principales sources de financement de l'université ?,text,True
+Financement et ressources financières,Comment l'université gère-t-elle son budget et ses ressources financières ?,text,True
+Financement et ressources financières,Existe-t-il des partenariats financiers avec des entreprises ou des organisations ?,text,False
+Financement et ressources financières,Quel est le montant des frais de scolarité et comment sont-ils déterminés ?,text,True
+Financement et ressources financières,L'université propose-t-elle des bourses ou des aides financières aux étudiants ?,text,False
+Financement et ressources financières,Comment l'université assure-t-elle la transparence et la responsabilité financière ?,text,True
+Impact communautaire et régional,Comment l'université contribue-t-elle au développement économique et social de la région ?,text,True
+Impact communautaire et régional,L'université propose-t-elle des programmes ou des initiatives pour la communauté locale ?,text,False
+Impact communautaire et régional,Comment l'université collabore-t-elle avec les entreprises et les organisations locales ?,text,True
+Impact communautaire et régional,Quel est l'impact des recherches menées par l'université sur la communauté ?,text,False
+Impact communautaire et régional,L'université participe-t-elle à des projets de développement durable dans la région ?,text,False
+Impact communautaire et régional,Comment l'université mesure-t-elle son impact sur la communauté et la région ?,text,True
+Impact communautaire et régional,Quels sont les défis rencontrés par l'université dans son engagement communautaire ?,text,False

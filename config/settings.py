@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     
     # ==================== Gemini Configuration ====================
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    # UTILISATION DU MODÈLE DISPONIBLE ET PUISSANT
     gemini_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_MODEL")
     
     # ==================== Backup LLM Configuration ====================
@@ -87,39 +88,29 @@ class Settings(BaseSettings):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Créer les dossiers s'ils n'existent pas
         os.makedirs(self.excel_output_dir, exist_ok=True)
         os.makedirs(os.path.dirname(self.log_file) or ".", exist_ok=True)
     
     # ==================== API Keys Management ====================
     
     def get_openai_keys(self) -> List[str]:
-        """Retourne les clés OpenAI disponibles (ordre: key_1, key_2)"""
         keys = []
-        if self.openai_api_key_1:
-            keys.append(self.openai_api_key_1)
-        if self.openai_api_key_2:
-            keys.append(self.openai_api_key_2)
+        if self.openai_api_key_1: keys.append(self.openai_api_key_1)
+        if self.openai_api_key_2: keys.append(self.openai_api_key_2)
         return keys
     
     def get_anthropic_keys(self) -> List[str]:
-        """Retourne les clés Anthropic disponibles (ordre: key_1, key_2)"""
         keys = []
-        if self.anthropic_api_key_1:
-            keys.append(self.anthropic_api_key_1)
-        if self.anthropic_api_key_2:
-            keys.append(self.anthropic_api_key_2)
+        if self.anthropic_api_key_1: keys.append(self.anthropic_api_key_1)
+        if self.anthropic_api_key_2: keys.append(self.anthropic_api_key_2)
         return keys
     
     def get_gemini_keys(self) -> List[str]:
-        """Retourne les clés Gemini disponibles"""
         keys = []
-        if self.gemini_api_key:
-            keys.append(self.gemini_api_key)
+        if self.gemini_api_key: keys.append(self.gemini_api_key)
         return keys
     
     def get_all_api_keys(self) -> Dict[str, List[str]]:
-        """Retourne toutes les clés API organisées par provider"""
         return {
             "openai": self.get_openai_keys(),
             "anthropic": self.get_anthropic_keys(),
@@ -127,7 +118,6 @@ class Settings(BaseSettings):
         }
     
     def validate_api_keys(self) -> Dict[str, Dict[str, Any]]:
-        """Valide la disponibilité des clés API"""
         return {
             "openai": {
                 "available": len(self.get_openai_keys()) > 0,
@@ -147,8 +137,6 @@ class Settings(BaseSettings):
         }
     
     def has_google_maps(self) -> bool:
-        """Vérifie si la clé Google Maps est configurée"""
         return bool(self.google_maps_api_key)
 
-# Instance globale des paramètres
 settings = Settings()

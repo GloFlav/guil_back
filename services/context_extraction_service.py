@@ -42,13 +42,13 @@ Analyse le prompt utilisateur et extrais les informations clés pour structurer 
 
 INSTRUCTIONS:
 1. Identifie l'objectif principal de l'enquête
-2. Détermine le nombre de questions (entre 24 et 60, sinon 30 par défaut)
+2. Détermine le nombre de questions (entre 24 et 60, sinon 50 par défaut)
 3. Identifie les zones géographiques mentionnées (régions, districts, localités)
 4. Estime le nombre de lieux pour l'enquête (entre 3 et 20, sinon 5 par défaut)
 5. Détermine l'audience cible
-6. Propose 5-6 catégories de questions pertinentes
-7. Estime le nombre de répondants (100 par défaut)
-8. Estime le nombre d'enquêteurs (5 par défaut)
+6. Propose 10 catégories de questions pertinentes
+7. Estime le nombre de répondants selon l'objectif
+8. Estime le nombre d'enquêteurs selon l'ampleur
 
 Retourne UNIQUEMENT un JSON valide sans texte supplémentaire."""
     
@@ -62,7 +62,7 @@ Retourne UNIQUEMENT un JSON valide sans texte supplémentaire."""
             "geographic_zones": "string - Zones géographiques (ex: 'Analamanga, Antananarivo')",
             "number_of_respondents": "integer - Nombre de répondants estimé",
             "number_of_investigators": "integer - Nombre d'enquêteurs estimé",
-            "categories": ["string - Noms des 5-6 catégories proposées"]
+            "categories": ["string - Noms des 10 catégories proposées"]
         }"""
     
     async def extract_context(self, user_prompt: str) -> Dict[str, Any]:
@@ -132,7 +132,7 @@ Réponds UNIQUEMENT avec un JSON valide, sans texte supplémentaire."""
             # Validation des valeurs
             context_data["number_of_questions"] = max(
                 settings.min_questions,
-                min(context_data.get("number_of_questions", 30), settings.max_questions)
+                min(context_data.get("number_of_questions", 50), settings.max_questions)
             )
             
             context_data["number_of_locations"] = max(
@@ -171,7 +171,7 @@ Réponds UNIQUEMENT avec un JSON valide, sans texte supplémentaire."""
         """Retourne un contexte par défaut si l'extraction échoue"""
         return {
             "survey_objective": user_prompt[:100],
-            "number_of_questions": 30,
+            "number_of_questions": 50,
             "number_of_locations": 5,
             "target_audience": "Général",
             "geographic_zones": "Analamanga, Antananarivo",
