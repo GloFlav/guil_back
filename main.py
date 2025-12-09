@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, HTTPException, BackgroundTasks, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, HTTPException, BackgroundTasks, WebSocketDisconnect, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,11 +12,13 @@ import json
 
 from config.settings import settings
 from models.survey import SurveyGenerationRequest
+from models.analysis import FilePreviewResponse  # <--- NOUVEAU MODEL
 from utils.websocket_manager import connection_manager, ProgressStreamer, WebSocketLogHandler
 from services.context_extraction_service import context_extraction_service
 from services.administrative_data_service import adm_service
 from services.multi_llm_orchestration import multi_llm_orchestration
 from services.export_service import export_service
+from services.upload_service import upload_service # <--- NOUVEAU SERVICE
 
 # ==================== Configuration du Logging ====================
 
@@ -74,6 +76,23 @@ async def download_export(filename: str):
     if os.path.exists(path):
         return FileResponse(path, filename=filename)
     raise HTTPException(404, "Fichier non trouvé")
+
+# ==================== Routes Analyse de Données (NOUVEAU) ====================
+
+@app.post("/api/v1/analyze/upload-preview", response_model=FilePreviewResponse)
+async def upload_file_preview(file: UploadFile):
+    """
+    Analyse rapide du fichier dès l'upload pour afficher les métadonnées au front.
+    Retourne nombre de lignes/cols, colonnes vides et preview des données.
+    """
+    logger.info(f"📤 Upload preview demandé pour: {file.filename}")
+    try:
+        # On délègue au service dédié qui utilise FileParser
+        return await upload_service.process_upload_preview(file)
+    except Exception as e:
+        logger.error(f"Erreur upload preview: {e}")
+        # On renvoie une 400 pour que le front sache que le fichier est illisible
+        raise HTTPException(status_code=400, detail=str(e))
 
 # ==================== Routes Export ====================
 
