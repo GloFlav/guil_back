@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import json
 import re
+import asyncio
 from scipy import stats
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
@@ -17,6 +18,8 @@ class EDAService:
     Service EDA amélioré avec:
     - Détection robuste de la cible
     - Graphiques enrichis et variés
+    - Tests statistiques complets (T-test, Chi-2, ANOVA)
+    - Mesures d'effet de taille (Cohen's d, Cramer's V, Eta-squared)
     - Gestion d'erreurs LLM améliorée
     - Stats complètes et visibles
     """
@@ -192,7 +195,7 @@ class EDAService:
                 plots[col] = {
                     "type": "distribution",
                     "title": col,
-                    "unit": "",  # Peut être enrichi
+                    "unit": "",
                     "histogram": [
                         {
                             "range": f"{round(bin_edges[i], 2)}-{round(bin_edges[i+1], 2)}",
@@ -231,13 +234,13 @@ class EDAService:
 
         for col in cat_cols:
             unique_count = df[col].nunique()
-            if 2 <= unique_count <= 10:  # Augmenté de 6 à 10
+            if 2 <= unique_count <= 10:
                 try:
                     counts = df[col].value_counts()
                     total = counts.sum()
                     data = [
                         {
-                            "name": str(k)[:50],  # Limiter la longueur
+                            "name": str(k)[:50],
                             "value": int(v),
                             "pct": round(100 * v / total, 1)
                         }
@@ -269,10 +272,9 @@ class EDAService:
             return []
 
         try:
-            # Corrélations avec la cible
             if target in num_cols:
                 corr_with_target = df[num_cols].corrwith(df[target]).abs().sort_values(ascending=False)
-                top_vars = [v for v in corr_with_target.index[1:6] if v != target]  # Top 5, exclure la cible
+                top_vars = [v for v in corr_with_target.index[1:6] if v != target]
             else:
                 top_vars = df[num_cols].var().nlargest(5).index.tolist()
 
@@ -282,7 +284,6 @@ class EDAService:
                     if len(clean_data) < 5:
                         continue
 
-                    # Sampling pour ne pas surcharger le front
                     sample_size = min(500, len(clean_data))
                     if len(clean_data) > 500:
                         sample = clean_data.sample(n=sample_size, random_state=42)
@@ -316,7 +317,6 @@ class EDAService:
     def _perform_smart_clustering(self, df: pd.DataFrame, n_clusters: int = 3) -> Optional[Dict[str, Any]]:
         """Clustering 3D avec profiling robuste."""
         try:
-            # Sélection intelligente des features
             numeric_df = df.select_dtypes(include=np.number)
             numeric_df = numeric_df.dropna(axis=1, thresh=len(df) * 0.5)
             numeric_df = numeric_df.fillna(numeric_df.median())
@@ -325,19 +325,15 @@ class EDAService:
                 logger.warning("⚠ Pas assez de données pour clustering")
                 return None
 
-            # Standardisation
             scaler = StandardScaler()
             scaled_data = scaler.fit_transform(numeric_df)
 
-            # K-Means
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
             clusters = kmeans.fit_predict(scaled_data)
 
-            # PCA 3D
             pca = PCA(n_components=3)
             coords = pca.fit_transform(scaled_data)
 
-            # Sampling pour le front
             limit = min(1000, len(coords))
             indices = np.random.choice(len(coords), limit, replace=False)
 
@@ -351,7 +347,6 @@ class EDAService:
                 for i in indices
             ]
 
-            # PROFILING: ADN des clusters
             df_clustered = numeric_df.copy()
             df_clustered['cluster'] = clusters
             global_means = numeric_df.mean()
@@ -367,7 +362,6 @@ class EDAService:
                 std = numeric_df.std().replace(0, 1)
                 z_scores = (local_means - global_means) / std
 
-                # Top 5 features différenciantes
                 top_features = z_scores.abs().nlargest(5)
 
                 features_desc = {}
@@ -398,11 +392,214 @@ class EDAService:
             return None
 
     # =========================================================
-    # 5. TESTS STATISTIQUES ROBUSTES
+    # 5. TESTS STATISTIQUES COMPLETS & DÉTAILLÉS
     # =========================================================
 
-    def _statistical_tests(self, df: pd.DataFrame, target: str) -> List[Dict]:
-        """Tests statistiques complets."""
+    def _calculate_cohens_d(self, group1: np.ndarray, group2: np.ndarray) -> Tuple[float, str]:
+        """Calcule Cohen's d (effect size pour T-test)."""
+        n1, n2 = len(group1), len(group2)
+        var1, var2 = np.var(group1, ddof=1), np.var(group2, ddof=1)
+        
+        pooled_std = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2))
+        
+        if pooled_std == 0:
+            return 0.0, "Nul"
+        
+        cohens_d = (np.mean(group1) - np.mean(group2)) / pooled_std
+        
+        abs_d = abs(cohens_d)
+        if abs_d < 0.2:
+            interpretation = "Effet très faible"
+        elif abs_d < 0.5:
+            interpretation = "Effet faible"
+        elif abs_d < 0.8:
+            interpretation = "Effet moyen"
+        else:
+            interpretation = "Effet fort"
+        
+        return round(cohens_d, 3), interpretation
+
+    def _calculate_cramers_v(self, chi2: float, n: int, min_dim: int) -> Tuple[float, str]:
+        """Calcule Cramer's V (effect size pour Chi-2)."""
+        if n == 0 or min_dim == 0:
+            return 0.0, "Nul"
+        
+        cramers_v = np.sqrt(chi2 / (n * (min_dim - 1)))
+        
+        if cramers_v < 0.1:
+            interpretation = "Effet très faible"
+        elif cramers_v < 0.3:
+            interpretation = "Effet faible"
+        elif cramers_v < 0.5:
+            interpretation = "Effet moyen"
+        else:
+            interpretation = "Effet fort"
+        
+        return round(cramers_v, 3), interpretation
+
+    def _independent_ttest(self, df: pd.DataFrame, group_col: str, value_col: str) -> Optional[Dict]:
+        """T-test indépendant: compare les moyennes de 2 groupes."""
+        try:
+            groups = df[group_col].unique()
+            groups = [g for g in groups if pd.notna(g)]
+            
+            if len(groups) != 2:
+                return None
+            
+            group1_data = df[df[group_col] == groups[0]][value_col].dropna().values
+            group2_data = df[df[group_col] == groups[1]][value_col].dropna().values
+            
+            if len(group1_data) < 2 or len(group2_data) < 2:
+                return None
+            
+            levene_stat, levene_p = stats.levene(group1_data, group2_data)
+            equal_var = levene_p > 0.05
+            
+            t_stat, p_value = stats.ttest_ind(group1_data, group2_data, equal_var=equal_var)
+            
+            cohens_d, cohens_interpretation = self._calculate_cohens_d(group1_data, group2_data)
+            
+            return {
+                "variable1": group_col,
+                "variable2": value_col,
+                "test_type": "ttest",
+                "test_name": "Independent T-Test" if equal_var else "Welch's T-Test",
+                "statistic": round(t_stat, 3),
+                "p_value": p_value,
+                "df": len(group1_data) + len(group2_data) - 2,
+                "group1": {
+                    "name": str(groups[0]),
+                    "mean": round(float(np.mean(group1_data)), 2),
+                    "std": round(float(np.std(group1_data)), 2),
+                    "n": len(group1_data)
+                },
+                "group2": {
+                    "name": str(groups[1]),
+                    "mean": round(float(np.mean(group2_data)), 2),
+                    "std": round(float(np.std(group2_data)), 2),
+                    "n": len(group2_data)
+                },
+                "equal_variances": equal_var,
+                "effect_size": {
+                    "value": cohens_d,
+                    "type": "Cohen's d",
+                    "interpretation": cohens_interpretation
+                },
+                "null_hypothesis": f"La moyenne de {value_col} est égale pour {groups[0]} et {groups[1]}",
+                "conclusion": "Différence significative" if p_value < 0.05 else "Pas de différence significative"
+            }
+        except Exception as e:
+            logger.warning(f"T-test error for {group_col} vs {value_col}: {e}")
+            return None
+
+    def _chi2_test(self, df: pd.DataFrame, var1: str, var2: str) -> Optional[Dict]:
+        """Chi-2 test: teste l'indépendance entre 2 variables catégoriques."""
+        try:
+            clean = df[[var1, var2]].dropna()
+            if len(clean) < 5:
+                return None
+            
+            ct = pd.crosstab(clean[var1], clean[var2])
+            
+            if ct.size < 4:
+                return None
+            
+            chi2, p_value, dof, expected = stats.chi2_contingency(ct)
+            
+            n = ct.sum().sum()
+            min_dim = min(ct.shape[0], ct.shape[1])
+            cramers_v, cramers_interpretation = self._calculate_cramers_v(chi2, n, min_dim)
+            
+            min_expected = expected.min()
+            
+            return {
+                "variable1": var1,
+                "variable2": var2,
+                "test_type": "chi2",
+                "test_name": "Chi-Square Test",
+                "statistic": round(chi2, 3),
+                "p_value": p_value,
+                "df": dof,
+                "n": n,
+                "contingency_table": ct.to_dict(),
+                "effect_size": {
+                    "value": cramers_v,
+                    "type": "Cramer's V",
+                    "interpretation": cramers_interpretation
+                },
+                "expected_freq_warning": min_expected < 5,
+                "expected_freq_min": round(float(min_expected), 2),
+                "null_hypothesis": f"{var1} et {var2} sont indépendants",
+                "conclusion": "Association significative" if p_value < 0.05 else "Pas d'association significative"
+            }
+        except Exception as e:
+            logger.warning(f"Chi-2 test error for {var1} vs {var2}: {e}")
+            return None
+
+    def _anova_test(self, df: pd.DataFrame, group_col: str, value_col: str) -> Optional[Dict]:
+        """ANOVA: teste les différences de moyennes entre 3+ groupes."""
+        try:
+            groups = df[group_col].unique()
+            groups = [g for g in groups if pd.notna(g)]
+            
+            if len(groups) < 3:
+                return None
+            
+            group_data = [df[df[group_col] == g][value_col].dropna().values for g in groups]
+            group_data = [g for g in group_data if len(g) >= 2]
+            
+            if len(group_data) < 3:
+                return None
+            
+            f_stat, p_value = stats.f_oneway(*group_data)
+            
+            grand_mean = np.concatenate(group_data).mean()
+            ss_between = sum(len(g) * (np.mean(g) - grand_mean)**2 for g in group_data)
+            ss_total = sum((x - grand_mean)**2 for g in group_data for x in g)
+            eta_squared = ss_between / ss_total if ss_total > 0 else 0
+            
+            if eta_squared < 0.01:
+                interpretation = "Effet très faible"
+            elif eta_squared < 0.06:
+                interpretation = "Effet faible"
+            elif eta_squared < 0.14:
+                interpretation = "Effet moyen"
+            else:
+                interpretation = "Effet fort"
+            
+            group_stats = []
+            for g, data in zip(groups, group_data):
+                group_stats.append({
+                    "group": str(g),
+                    "mean": round(float(np.mean(data)), 2),
+                    "std": round(float(np.std(data)), 2),
+                    "n": len(data)
+                })
+            
+            return {
+                "variable1": group_col,
+                "variable2": value_col,
+                "test_type": "anova",
+                "test_name": "One-Way ANOVA",
+                "statistic": round(f_stat, 3),
+                "p_value": p_value,
+                "df_between": len(groups) - 1,
+                "df_within": sum(len(g) - 1 for g in group_data),
+                "groups": group_stats,
+                "effect_size": {
+                    "value": round(eta_squared, 3),
+                    "type": "Eta-squared (η²)",
+                    "interpretation": interpretation
+                },
+                "null_hypothesis": f"Les moyennes de {value_col} sont égales pour tous les groupes de {group_col}",
+                "conclusion": "Différences significatives" if p_value < 0.05 else "Pas de différences significatives"
+            }
+        except Exception as e:
+            logger.warning(f"ANOVA error for {group_col} vs {value_col}: {e}")
+            return None
+
+    def _statistical_tests_comprehensive(self, df: pd.DataFrame, target: str) -> List[Dict]:
+        """Tests statistiques complets et détaillés."""
         tests = []
 
         if not target or target not in df.columns:
@@ -410,67 +607,70 @@ class EDAService:
 
         try:
             target_is_num = pd.api.types.is_numeric_dtype(df[target])
+            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+            categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
 
-            for col in df.columns:
-                if col == target:
-                    continue
+            # 1. T-tests: Catégorique binaire vs Numérique
+            for cat_col in categorical_cols:
+                unique_count = df[cat_col].nunique()
+                if unique_count == 2 and target_is_num:
+                    test = self._independent_ttest(df, cat_col, target)
+                    if test and test['p_value'] < 0.15:
+                        tests.append(test)
+                        logger.info(f"✓ T-test: {cat_col} vs {target}")
 
-                try:
-                    col_is_num = pd.api.types.is_numeric_dtype(df[col])
-                    clean = df[[target, col]].dropna()
+            # 2. ANOVA: Catégorique 3+ vs Numérique
+            for cat_col in categorical_cols:
+                unique_count = df[cat_col].nunique()
+                if unique_count >= 3 and target_is_num:
+                    test = self._anova_test(df, cat_col, target)
+                    if test and test['p_value'] < 0.15:
+                        tests.append(test)
+                        logger.info(f"✓ ANOVA: {cat_col} vs {target}")
 
-                    if len(clean) < 10:
-                        continue
+            # 3. Chi-2: Catégorique vs Catégorique
+            if not target_is_num:
+                for cat_col in categorical_cols:
+                    if cat_col != target:
+                        test = self._chi2_test(df, target, cat_col)
+                        if test and test['p_value'] < 0.15:
+                            tests.append(test)
+                            logger.info(f"✓ Chi-2: {target} vs {cat_col}")
 
-                    # Cas 1: Numérique vs Numérique
-                    if target_is_num and col_is_num:
-                        r, p = stats.pearsonr(clean[target], clean[col])
-                        if abs(r) > 0.15:  # Baissé le seuil
-                            tests.append({
-                                "variable": col,
-                                "test": "Pearson",
-                                "coefficient": round(r, 3),
-                                "p_value": round(p, 5),
-                                "strength": "Très forte" if abs(r) > 0.7 else "Forte" if abs(r) > 0.5 else "Modérée" if abs(r) > 0.3 else "Faible"
-                            })
-
-                    # Cas 2: Catégorique vs Numérique
-                    elif target_is_num and not col_is_num:
-                        # ANOVA si > 2 groupes
-                        groups = [clean[clean[col] == val][target].values for val in clean[col].unique()]
-                        if len(groups) >= 2:
-                            f_stat, p = stats.f_oneway(*groups)
-                            if p < 0.1:  # Moins strict
-                                tests.append({
-                                    "variable": col,
-                                    "test": "ANOVA",
-                                    "f_statistic": round(f_stat, 2),
-                                    "p_value": round(p, 5),
-                                    "strength": "Significatif" if p < 0.05 else "Tendance"
-                                })
-
-                    # Cas 3: Catégorique vs Catégorique
-                    elif not target_is_num and not col_is_num:
-                        ct = pd.crosstab(df[target], df[col])
-                        if ct.size > 1:
-                            chi2, p, _, _ = stats.chi2_contingency(ct)
-                            if p < 0.1:
-                                tests.append({
-                                    "variable": col,
-                                    "test": "Chi-2",
-                                    "chi2_stat": round(chi2, 2),
-                                    "p_value": round(p, 5),
-                                    "strength": "Significatif" if p < 0.05 else "Tendance"
-                                })
-
-                except Exception as e:
-                    logger.error(f"Test {col}: {e}")
-                    continue
+            # 4. Corrélations Pearson: Numérique vs Numérique
+            if target_is_num:
+                for num_col in numeric_cols:
+                    if num_col != target:
+                        try:
+                            clean = df[[target, num_col]].dropna()
+                            if len(clean) >= 10:
+                                r, p = stats.pearsonr(clean[target], clean[num_col])
+                                if abs(r) > 0.15 and p < 0.15:
+                                    tests.append({
+                                        "variable1": num_col,
+                                        "variable2": target,
+                                        "test_type": "pearson",
+                                        "test_name": "Pearson Correlation",
+                                        "statistic": round(r, 3),
+                                        "p_value": p,
+                                        "df": len(clean) - 2,
+                                        "effect_size": {
+                                            "value": round(r, 3),
+                                            "type": "r (Pearson)",
+                                            "interpretation": "Forte corrélation" if abs(r) > 0.5 else "Corrélation modérée" if abs(r) > 0.3 else "Faible corrélation"
+                                        },
+                                        "null_hypothesis": f"Pas de corrélation entre {num_col} et {target}",
+                                        "conclusion": "Corrélation significative" if p < 0.05 else "Tendance" if p < 0.15 else "Pas de corrélation"
+                                    })
+                                    logger.info(f"✓ Pearson: {num_col} vs {target} (r={r:.3f})")
+                        except Exception as e:
+                            logger.debug(f"Pearson error: {e}")
 
         except Exception as e:
-            logger.error(f"Tests statistiques global: {e}")
+            logger.error(f"Erreur tests statistiques: {e}", exc_info=True)
 
-        return sorted(tests, key=lambda x: abs(x.get('p_value', 1)))[:15]
+        # Tri par p-value et limitation
+        return sorted(tests, key=lambda x: x.get('p_value', 1))[:20]
 
     # =========================================================
     # 6. ORCHESTRATION MULTI-LLM ROBUSTE
@@ -483,15 +683,13 @@ class EDAService:
         insights = []
         
         try:
-            # Préparation des tâches
             tasks = []
 
-            # 1. Analyse des clusters (si disponible)
             if eda_data.get('clustering') and eda_data['clustering'].get('dna'):
                 dna_json = json.dumps(eda_data['clustering']['dna'], indent=2, ensure_ascii=False)
                 tasks.append({
                     "task_id": "clusters",
-                    "prompt": """Tu es un data analyst expert. Analyse ces clusters et génère EXACTEMENT un JSON array avec 3 objets (un par groupe).
+                    "prompt": """Tu es un data analyst expert. Analyse ces clusters et génère EXACTEMENT un JSON array avec 3 objets.
 CHAQUE objet DOIT avoir cette structure EXACTE :
 {
   "title": "Nom du groupe (10 mots max)",
@@ -502,7 +700,6 @@ Sois concis et factuel. Ne mets RIEN d'autre.""",
                     "data": f"DNA des Clusters:\n{dna_json}"
                 })
 
-            # 2. Analyse des corrélations
             if eda_data.get('tests'):
                 tests_json = json.dumps(eda_data['tests'][:8], indent=2)
                 tasks.append({
@@ -517,7 +714,6 @@ Génère UN SEUL JSON object :
                     "data": tests_json
                 })
 
-            # 3. Vue d'ensemble
             univariate = eda_data.get('univariate', {})
             summary_stats = {
                 "total_variables": len(univariate),
@@ -537,11 +733,9 @@ Génère UN SEUL JSON object :
                 "data": json.dumps(summary_stats)
             })
 
-            # Exécution avec gestion d'erreurs
             if tasks:
                 logger.info(f"🚀 Lancement {len(tasks)} tâches LLM")
                 try:
-                    # Appel du service avec timeout
                     ai_results = await asyncio.wait_for(
                         multi_llm_insights.run_parallel_analysis(tasks),
                         timeout=120
@@ -563,12 +757,11 @@ Génère UN SEUL JSON object :
         except Exception as e:
             logger.error(f"Erreur globale insights: {e}")
 
-        # Fallback: Générer des insights basiques
         if len(insights) < 3:
             logger.warning("⚠ Génération d'insights de secours")
             insights.extend(self._generate_fallback_insights(eda_data, context))
 
-        return insights[:5]  # Max 5 insights
+        return insights[:5]
 
     def _generate_fallback_insights(self, eda_data: Dict, context: dict) -> List[Dict]:
         """Insights de secours (sans LLM)."""
@@ -576,7 +769,6 @@ Génère UN SEUL JSON object :
 
         target = context.get('target_variable', 'Unknown')
         
-        # 1. Insights basée sur la structure
         n_num = len([s for s in eda_data.get('univariate', {}).values() if s.get('type') == 'numeric'])
         n_cat = len([s for s in eda_data.get('univariate', {}).values() if s.get('type') == 'categorical'])
         
@@ -586,17 +778,15 @@ Génère UN SEUL JSON object :
             "recommendation": "Procéder à l'analyse des corrélations et clusters."
         })
 
-        # 2. Insights basée sur les tests
         tests = eda_data.get('tests', [])
         if tests:
             top_test = tests[0]
             fallback.append({
                 "title": "Relation clé trouvée",
-                "summary": f"{top_test.get('variable', 'X')} montre une relation significative avec la cible.",
+                "summary": f"{top_test.get('variable1', 'X')} vs {top_test.get('variable2', 'Y')} montre une relation significative.",
                 "recommendation": "Investiguer cette variable en priorité."
             })
 
-        # 3. Insights clustering
         if eda_data.get('clustering'):
             fallback.append({
                 "title": "Segmentation découverte",
@@ -612,28 +802,23 @@ Génère UN SEUL JSON object :
 
     async def run_full_eda(self, df: pd.DataFrame, context: dict, user_prompt: str) -> dict:
         """Pipeline EDA complet et robuste."""
-        import asyncio
         
         logger.info(f"🎯 Démarrage EDA pour {len(df)} lignes × {len(df.columns)} colonnes")
 
-        # A. Nettoyage basique
         df = df.fillna(df.mean(numeric_only=True))
 
-        # B. Smart Target Detection
         target = self._smart_target_detection(df, user_prompt, context)
         logger.info(f"📍 Cible: {target}")
 
-        # C. Thématisation (optionnel)
         themes = self._detect_themes(df)
 
-        # D. Calculs EDA complets
         try:
             univariate = self._get_complete_univariate_stats(df)
             distributions = self._get_rich_distributions(df)
             pie_charts = self._get_enriched_pie_charts(df)
             scatter_plots = self._get_enhanced_scatter_plots(df, target)
             clustering = self._perform_smart_clustering(df, n_clusters=3)
-            statistical_tests = self._statistical_tests(df, target)
+            statistical_tests = self._statistical_tests_comprehensive(df, target)
 
             logger.info(f"✓ Stats complètes: {len(univariate)} variables")
             logger.info(f"✓ Distributions: {len(distributions)} graphes")
@@ -645,7 +830,6 @@ Génère UN SEUL JSON object :
             logger.error(f"❌ Erreur calculs EDA: {e}", exc_info=True)
             return self._generate_fallback_eda(df, target)
 
-        # E. Corrélation
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
         corr_matrix = {}
         if len(numeric_cols) > 1:
@@ -653,7 +837,6 @@ Génère UN SEUL JSON object :
             focus_cols = [c for c in focus_cols if c in numeric_cols]
             corr_matrix = df[focus_cols].corr().round(2).fillna(0).to_dict()
 
-        # F. IA Insights (avec fallback)
         eda_data_for_ai = {
             "univariate": univariate,
             "clustering": clustering,
@@ -664,7 +847,6 @@ Génère UN SEUL JSON object :
                                                              {"target_variable": target, **context}, 
                                                              user_prompt)
 
-        # G. Packaging final
         return {
             "metrics": {
                 "univariate": univariate,
