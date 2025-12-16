@@ -67,7 +67,7 @@ class CleaningService:
         
         # 7. TYPAGE OPTIMISÉ
         df = df.convert_dtypes()
-
+ 
         # 8. SAUVEGARDE
         output_filename = f"cleaned_{uuid.uuid4()}.{output_format}"
         output_path = os.path.join(settings.excel_output_dir, output_filename)

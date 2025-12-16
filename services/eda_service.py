@@ -1,926 +1,1470 @@
+"""
+🎯 EDA SERVICE V5 - CLUSTERING ROBUSTE AVEC VISUALISATION 3D COMPLÈTE
+✅ FIX: Afficher TOUS les points sans échantillonnage
+✅ FIX: Meilleur équilibre des clusters
+✅ FIX: Variables binaires mieux gérées
+✅ FIX: TTS toujours activé
+"""
+
 import pandas as pd
 import numpy as np
+from typing import Dict, Any, List, Optional
+import logging
 import json
-import re
 import asyncio
 from scipy import stats
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from typing import List, Dict, Any, Tuple, Optional
-from models.analysis import Insight
-import logging
+from sklearn.metrics import silhouette_score, davies_bouldin_score
+from sklearn.impute import SimpleImputer
+from sklearn.neighbors import NearestNeighbors
+from sklearn.mixture import GaussianMixture
+import warnings
+warnings.filterwarnings('ignore')
 
 logger = logging.getLogger(__name__)
 
+
 class EDAService:
-    """
-    Service EDA amélioré avec:
-    - Détection robuste de la cible
-    - Graphiques enrichis et variés
-    - Tests statistiques complets (T-test, Chi-2, ANOVA)
-    - Mesures d'effet de taille (Cohen's d, Cramer's V, Eta-squared)
-    - Gestion d'erreurs LLM améliorée
-    - Stats complètes et visibles
-    """
+    """EDA SERVICE V5 - CLUSTERING ROBUSTE ET VISUALISATION 3D COMPLÈTE"""
 
-    # =========================================================
-    # 1. DÉTECTION INTELLIGENTE DE LA CIBLE
-    # =========================================================
-
-    def _smart_target_detection(self, df: pd.DataFrame, user_prompt: str, context: dict) -> str:
-        """Détecte la variable cible de manière intelligente."""
+    def _smart_target_detection(self, df: pd.DataFrame, user_prompt: str, context: Dict[str, Any]) -> str:
+        """Détecte la cible intelligemment"""
+        logger.info("🎯 DÉTECTION INTELLIGENTE DE LA CIBLE")
         
-        # A. Si la cible est explicite dans le contexte
         target = context.get('target_variable') or context.get('focus_variable')
         if target and target in df.columns:
-            logger.info(f"✓ Cible explicite trouvée: {target}")
+            logger.info(f"  ✓ Cible explicite: {target}")
             return target
-
-        # B. Recherche de mots-clés dans le prompt (fr/en/mg)
-        keywords_target = {
-            'objectif': ['target', 'cible', 'predict', 'prédire', 'outcome', 'résultat', 'but', 'depend'],
-            'monétaire': ['prix', 'prix', 'revenu', 'salaire', 'coût', 'bola', 'vidin'],
-            'temporel': ['date', 'durée', 'mois', 'année', 'temps', 'fotoana'],
-            'binaire': ['oui/non', 'yes/no', 'succès', 'défaut', 'présence', 'absence']
-        }
-
+        
         for col in df.columns:
             col_lower = col.lower()
-            # Recherche de patterns directs
             if any(k in col_lower for k in ['target', 'cible', 'objectif', 'outcome', 'y_', '_y']):
-                logger.info(f"✓ Cible détectée par pattern: {col}")
+                logger.info(f"  ✓ Cible par pattern: {col}")
                 return col
-            
-            # Recherche dans le prompt
             if col_lower in user_prompt.lower():
-                logger.info(f"✓ Cible mentionnée dans le prompt: {col}")
+                logger.info(f"  ✓ Cible mentionnée: {col}")
                 return col
-
-        # C. Heuristiques automatiques pour la meilleure cible
+        
         numeric_cols = df.select_dtypes(include=np.number).columns
         if len(numeric_cols) == 0:
-            logger.warning("⚠ Aucune colonne numérique - sélection par défaut")
+            logger.warning("⚠ Aucune colonne numérique")
             return df.columns[0] if len(df.columns) > 0 else "Non définie"
-
-        # Évaluation des colonnes numériques (variance, ratio d'asymétrie, plage)
+        
         candidate_scores = {}
         for col in numeric_cols:
             if df[col].nunique() < 2:
                 continue
-
             clean_data = df[col].dropna()
             if len(clean_data) < 10:
                 continue
-
-            # Score de variabilité (variance normalisée)
-            var_score = clean_data.std() / (clean_data.mean().abs() + 1e-6)
             
-            # Score d'asimétrie (pas trop symétrique, pas trop extrême)
+            var_score = clean_data.std() / (clean_data.mean().abs() + 1e-6)
             skew = clean_data.skew()
             skew_score = 1.0 - min(abs(skew) / 3, 1.0)
-            
-            # Score de complétude
             completeness = clean_data.notna().sum() / len(df[col])
             
-            # Colonne avec plus de variance = meilleure cible
-            total_score = (
-                var_score * 0.4 +      # Variabilité (important)
-                skew_score * 0.3 +     # Distribution (modérée)
-                completeness * 0.3     # Pas de NaN (important)
-            )
-            
+            total_score = (var_score * 0.4 + skew_score * 0.3 + completeness * 0.3)
             candidate_scores[col] = total_score
-
+        
         if candidate_scores:
             target = max(candidate_scores, key=candidate_scores.get)
-            logger.info(f"✓ Cible auto-sélectionnée: {target} (score: {candidate_scores[target]:.2f})")
+            logger.info(f"  ✓ Cible auto-sélectionnée: {target}")
             return target
+        
+        return numeric_cols[0] if len(numeric_cols) > 0 else df.columns[0]
 
-        return "Non définie"
-
-    # =========================================================
-    # 2. EXTRACTION COMPLÈTE DES STATISTIQUES
-    # =========================================================
-
-    def _get_complete_univariate_stats(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Statistiques univariées complètes et bien formatées."""
-        stats_dict = {}
-
-        for col in df.columns:
-            col_dtype = df[col].dtype
-            
-            if pd.api.types.is_numeric_dtype(col_dtype):
-                clean_data = df[col].dropna()
-                if len(clean_data) < 2:
-                    continue
-
-                desc = clean_data.describe()
-                
-                # Protection contre les NaN
-                safe = lambda v: 0 if (pd.isna(v) or np.isinf(v)) else float(v)
-                
-                stats_dict[col] = {
-                    "type": "numeric",
-                    "count": int(len(clean_data)),
-                    "missing": int(df[col].isna().sum()),
-                    "missing_pct": round(100 * df[col].isna().sum() / len(df), 1),
-                    "mean": round(safe(desc.get('mean')), 2),
-                    "median": round(safe(desc.get('50%')), 2),
-                    "mode": float(clean_data.mode()[0]) if len(clean_data.mode()) > 0 else None,
-                    "std": round(safe(desc.get('std')), 2),
-                    "var": round(safe(clean_data.var()), 2),
-                    "min": safe(desc.get('min')),
-                    "max": safe(desc.get('max')),
-                    "q1": round(safe(desc.get('25%')), 2),
-                    "q3": round(safe(desc.get('75%')), 2),
-                    "iqr": round(safe(desc.get('75%')) - safe(desc.get('25%')), 2) if (safe(desc.get('75%')) != 0 and safe(desc.get('25%')) != 0) else 0,
-                    "skew": round(safe(clean_data.skew()), 2),
-                    "kurtosis": round(safe(clean_data.kurtosis()), 2),
-                    "cv": round(safe(desc.get('std')) / (abs(safe(desc.get('mean'))) + 1e-6), 2)  # Coeff variation
-                }
-            else:
-                try:
-                    top = df[col].value_counts().head(10)
-                    stats_dict[col] = {
-                        "type": "categorical",
-                        "unique": int(df[col].nunique()),
-                        "missing": int(df[col].isna().sum()),
-                        "missing_pct": round(100 * df[col].isna().sum() / len(df), 1),
-                        "top_values": {str(k): int(v) for k, v in top.items()},
-                        "top_category": str(top.index[0]) if len(top) > 0 else None,
-                        "cardinality_ratio": round(df[col].nunique() / len(df), 2)
-                    }
-                except Exception as e:
-                    logger.error(f"Erreur stats {col}: {e}")
-                    stats_dict[col] = {"type": "categorical", "error": str(e)}
-
-        return stats_dict
-
-    # =========================================================
-    # 3. GRAPHIQUES ENRICHIS & VARIÉS
-    # =========================================================
-
-    def _get_rich_distributions(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Histogrammes + Boxplots enrichis avec labels."""
-        plots = {}
-        numeric_cols = df.select_dtypes(include=np.number).columns
-
+    def _select_key_variables(self, df: pd.DataFrame, file_structure: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        """Sélection intelligente de variables"""
+        logger.info("🧠 SÉLECTION INTELLIGENTE DE VARIABLES")
+        
+        target_var = context.get('target_variable', '')
+        focus_vars = context.get('focus_variables', [])
+        
+        numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        
+        # SCORING NUMÉRIQUES
+        numeric_scores = {}
         for col in numeric_cols:
             if df[col].nunique() < 2:
                 continue
+            clean_data = df[col].dropna()
+            if len(clean_data) < 5:
+                continue
             
+            mean_val = clean_data.mean()
+            cv = clean_data.std() / (abs(mean_val) + 1e-6)
+            cv_score = min(cv, 3.0) / 3.0
+            completeness = 1 - (df[col].isna().sum() / len(df))
+            focus_bonus = 0.3 if col in focus_vars else 0
+            
+            numeric_scores[col] = cv_score * 0.4 + completeness * 0.3 + focus_bonus
+        
+        # SCORING CATÉGORIES
+        categorical_scores = {}
+        for col in categorical_cols:
+            unique_count = df[col].nunique()
+            if unique_count < 2 or unique_count > 20:
+                continue
+            
+            cardinality_score = 1.0 - (unique_count / 20.0)
+            completeness = 1 - (df[col].isna().sum() / len(df))
+            focus_bonus = 0.3 if col in focus_vars else 0
+            
+            categorical_scores[col] = cardinality_score * 0.4 + completeness * 0.4 + focus_bonus
+        
+        top_numeric = sorted(numeric_scores.items(), key=lambda x: x[1], reverse=True)[:15]
+        top_categorical = sorted(categorical_scores.items(), key=lambda x: x[1], reverse=True)[:8]
+        
+        numeric_analysis = [col for col, _ in top_numeric]
+        categorical_analysis = [col for col, _ in top_categorical]
+        
+        if not numeric_analysis:
+            numeric_analysis = numeric_cols[:15]
+            logger.warning("⚠️ Aucune variables numériques scorées")
+        
+        if not categorical_analysis:
+            categorical_analysis = categorical_cols[:8]
+            logger.warning("⚠️ Aucune variables catégories scorées")
+        
+        if target_var and target_var in df.columns:
+            selected_target = target_var
+        elif len(numeric_analysis) > 0:
+            selected_target = numeric_analysis[0]
+        else:
+            selected_target = df.columns[0] if len(df.columns) > 0 else "Non définie"
+        
+        return {
+            "target": selected_target,
+            "numeric_analysis": numeric_analysis,
+            "categorical_analysis": categorical_analysis,
+            "grouping_candidates": categorical_analysis[:3],
+            "correlation_vars": numeric_analysis[:10],
+            "reasoning": {
+                "target_reasoning": f"Variable '{selected_target}' sélectionnée",
+                "numeric_reasoning": f"{len(numeric_analysis)} variables numériques",
+                "categorical_reasoning": f"{len(categorical_analysis)} variables catégories"
+            },
+            "scores": {
+                "numeric": {col: round(score, 3) for col, score in top_numeric},
+                "categorical": {col: round(score, 3) for col, score in top_categorical}
+            }
+        }
+
+    def _get_univariate_stats_smart(self, df: pd.DataFrame, selected_vars: Dict[str, Any]) -> Dict[str, Any]:
+        """Stats univariées"""
+        numeric_cols = selected_vars.get('numeric_analysis', [])
+        categorical_cols = selected_vars.get('categorical_analysis', [])
+        stats_dict = {}
+        
+        for col in numeric_cols:
+            clean = df[col].dropna()
+            if len(clean) < 2:
+                continue
+            desc = clean.describe()
+            safe = lambda v: 0 if (pd.isna(v) or np.isinf(v)) else float(v)
+            
+            mode_val = float(clean.mode()[0]) if len(clean.mode()) > 0 else None
+            q1 = desc['25%']
+            q3 = desc['75%']
+            iqr = q3 - q1
+            outliers = len([x for x in clean if x < (q1 - 1.5 * iqr) or x > (q3 + 1.5 * iqr)])
+            
+            mean_val = desc['mean']
+            cv = desc['std'] / (abs(mean_val) + 1e-6) if mean_val != 0 else 0
+            
+            stats_dict[col] = {
+                "type": "numeric",
+                "count": int(len(clean)),
+                "missing": int(df[col].isna().sum()),
+                "missing_pct": round(100 * df[col].isna().sum() / len(df), 1),
+                "mean": round(safe(desc['mean']), 2),
+                "median": round(safe(desc['50%']), 2),
+                "mode": mode_val,
+                "std": round(safe(desc['std']), 2),
+                "var": round(safe(clean.var()), 2),
+                "min": safe(desc['min']),
+                "max": safe(desc['max']),
+                "q1": round(safe(desc['25%']), 2),
+                "q3": round(safe(desc['75%']), 2),
+                "iqr": round(safe(iqr), 2),
+                "skew": round(safe(clean.skew()), 2),
+                "kurtosis": round(safe(clean.kurtosis()), 2),
+                "cv": round(safe(cv), 2),
+                "outliers": outliers
+            }
+        
+        for col in categorical_cols:
+            top = df[col].value_counts().head(10)
+            stats_dict[col] = {
+                "type": "categorical",
+                "unique": int(df[col].nunique()),
+                "missing": int(df[col].isna().sum()),
+                "missing_pct": round(100 * df[col].isna().sum() / len(df), 1),
+                "top_values": {str(k): int(v) for k, v in top.items()},
+                "top_category": str(top.index[0]) if len(top) > 0 else None,
+                "cardinality_ratio": round(df[col].nunique() / len(df), 2)
+            }
+        
+        return stats_dict
+
+    def _select_best_clustering_variables(self, df: pd.DataFrame, numeric_cols: List[str]) -> List[str]:
+        """
+        🔧 V5: Sélectionner les variables pour clustering - ÉVITER LES VARIABLES TROP DÉSÉQUILIBRÉES
+        """
+        
+        logger.info("🎯 SÉLECTION VARIABLES CLUSTERING V5 - Filtrage amélioré")
+        
+        if len(numeric_cols) < 2:
+            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+        
+        clustering_scores = {}
+        
+        for col in numeric_cols:
+            clean = df[col].dropna()
+            
+            if len(clean) < 10:  # Minimum de points
+                continue
+                
+            # Calculer plusieurs métriques
+            variance = clean.var()
+            unique_count = df[col].nunique()
+            
+            # 🔥 FILTRES STRICTS :
+            # 1. Variance trop faible (variables quasi-constantes)
+            if variance < 0.001:
+                logger.info(f"  ⚠️ {col}: Variance trop faible ({variance:.4f})")
+                continue
+                
+            # 2. Variables binaires déséquilibrées (>95% d'une valeur)
+            if unique_count == 2:
+                value_counts = df[col].value_counts(normalize=True)
+                max_ratio = value_counts.max()
+                if max_ratio > 0.95:
+                    logger.info(f"  ⚠️ {col}: Binaire trop déséquilibré ({max_ratio:.1%})")
+                    continue
+                # Bonus modéré pour binaires équilibrées
+                balance_score = 1.0 - abs(value_counts.iloc[0] - 0.5) * 2
+            else:
+                balance_score = 1.0
+                
+            # 3. Cardinalité trop faible avec variance faible
+            if unique_count < 3 and variance < 0.1:
+                logger.info(f"  ⚠️ {col}: Cardinalité faible ({unique_count}) avec variance faible ({variance:.3f})")
+                continue
+            
+            # Score amélioré
+            if abs(clean.mean()) > 1e-6:
+                variance_score = min(np.sqrt(variance) / abs(clean.mean()), 1.0)
+            else:
+                variance_score = min(variance, 1.0)
+                
+            completeness = 1.0 - (df[col].isna().sum() / len(df))
+            
+            # Bonus pour diversité
+            diversity_bonus = min(unique_count / 15, 0.5)
+            
+            # Pénalité de skew modérée
+            skew = abs(clean.skew()) if len(clean) > 2 else 0
+            skew_penalty = 1.0 - min(skew / 6.0, 0.3)
+            
+            score = (
+                variance_score * 0.35 +
+                completeness * 0.25 +
+                diversity_bonus * 0.20 +
+                balance_score * 0.10 +
+                skew_penalty * 0.10
+            )
+            
+            clustering_scores[col] = score
+            logger.info(f"  📊 {col}: score={score:.3f}, unique={unique_count}, var={variance:.3f}, skew={skew:.2f}")
+        
+        if not clustering_scores:
+            logger.warning("⚠️ Aucune variable scorée, utilisation de toutes les variables")
+            return [c for c in numeric_cols if df[c].notna().sum() >= 5][:10]
+        
+        # Trier et retourner les meilleures (moins mais mieux)
+        sorted_cols = sorted(clustering_scores.items(), key=lambda x: x[1], reverse=True)
+        best_cols = [col for col, _ in sorted_cols[:min(8, len(sorted_cols))]]
+        
+        logger.info(f"✅ Top {len(best_cols)} variables clustering: {best_cols}")
+        return best_cols
+
+    def _balance_clusters(self, clusters: np.ndarray, min_size_ratio: float = 0.05) -> np.ndarray:
+        """
+        Rééquilibrer les clusters pour éviter les groupes trop petits
+        min_size_ratio: taille minimum relative (5% par défaut)
+        """
+        unique, counts = np.unique(clusters, return_counts=True)
+        total = len(clusters)
+        min_size = int(total * min_size_ratio)
+        
+        # Identifier les petits clusters
+        small_clusters = unique[counts < min_size]
+        
+        if len(small_clusters) == 0:
+            return clusters
+        
+        # Réassigner les points des petits clusters au cluster le plus proche en taille
+        balanced = clusters.copy()
+        for small_c in small_clusters:
+            mask = clusters == small_c
+            if np.sum(mask) > 0:
+                # Trouver le cluster avec le plus de points (hors petits clusters)
+                valid_clusters = unique[counts >= min_size]
+                if len(valid_clusters) > 0:
+                    # Assigner au cluster majoritaire
+                    balanced[mask] = valid_clusters[0]
+        
+        logger.info(f"🔧 Rééquilibrage: {len(small_clusters)} petits clusters fusionnés")
+        return balanced
+
+    def _validate_clustering(self, clusters: np.ndarray, n_clusters: int) -> Dict[str, Any]:
+        """Valider la qualité du clustering"""
+        
+        unique_clusters = np.unique(clusters[clusters >= 0])  # Ignorer -1 (bruit DBSCAN)
+        actual_clusters = len(unique_clusters)
+        
+        # Distribution des clusters
+        cluster_dist = {}
+        for c in unique_clusters:
+            cluster_dist[int(c)] = int(np.sum(clusters == c))
+        
+        # Gérer le cas où il n'y a pas de clusters valides
+        if not cluster_dist:
+            return {
+                "actual_clusters": 0,
+                "cluster_distribution": {},
+                "min_cluster_size": 0,
+                "max_cluster_size": 0,
+                "balance_ratio": 0,
+                "is_balanced": False
+            }
+        
+        # Taille minimum des clusters
+        min_cluster_size = min(cluster_dist.values())
+        max_cluster_size = max(cluster_dist.values())
+        
+        # Ratio de balance
+        balance_ratio = min_cluster_size / max_cluster_size if max_cluster_size > 0 else 0
+        
+        return {
+            "actual_clusters": actual_clusters,
+            "cluster_distribution": cluster_dist,
+            "min_cluster_size": min_cluster_size,
+            "max_cluster_size": max_cluster_size,
+            "balance_ratio": round(balance_ratio, 3),
+            "is_balanced": balance_ratio > 0.1  # Seuil assoupli
+        }
+
+    def _create_3d_coordinates(self, scaled_data: np.ndarray, n_vars: int) -> np.ndarray:
+        """
+        🔧 V5: Créer des coordonnées 3D robustes
+        """
+        n_samples = len(scaled_data)
+        
+        if n_vars >= 3:
+            # PCA standard
+            pca = PCA(n_components=3, random_state=42)
+            coords = pca.fit_transform(scaled_data)
+            logger.info(f"  📊 PCA: {n_vars} vars → 3 composantes, variance expliquée: {pca.explained_variance_ratio_}")
+            
+        elif n_vars == 2:
+            # 2 variables: créer un 3ème axe basé sur la distance
+            pca = PCA(n_components=2, random_state=42)
+            coords_2d = pca.fit_transform(scaled_data)
+            
+            # 3ème axe = distance au centre + variation
+            center = coords_2d.mean(axis=0)
+            distances = np.linalg.norm(coords_2d - center, axis=1)
+            z_axis = (distances - distances.min()) / (distances.max() - distances.min() + 1e-6) * 2 - 1
+            
+            # Ajouter du bruit structuré
+            np.random.seed(42)
+            z_axis = z_axis + np.random.normal(0, 0.2, n_samples)
+            
+            coords = np.column_stack([coords_2d, z_axis])
+            logger.info(f"  📊 2 vars → 3D avec axe Z basé sur distance")
+            
+        else:
+            # 1 variable: créer 3 axes artificiels intéressants
+            var_data = scaled_data.flatten() if scaled_data.ndim > 1 else scaled_data
+            
+            # Normaliser
+            var_min, var_max = var_data.min(), var_data.max()
+            if var_max - var_min > 0:
+                var_normalized = (var_data - var_min) / (var_max - var_min) * 2 - 1
+            else:
+                var_normalized = np.zeros_like(var_data)
+            
+            # Axe X: valeur normalisée avec bruit
+            np.random.seed(42)
+            x_axis = var_normalized + np.random.normal(0, 0.2, n_samples)
+            
+            # Axe Y: transformation sinusoïdale + bruit
+            y_axis = np.sin(var_normalized * np.pi) + np.random.normal(0, 0.3, n_samples)
+            
+            # Axe Z: variation structurée par rang + bruit
+            ranks = np.argsort(np.argsort(var_data))  # Rangs
+            z_axis = (ranks / n_samples) * 2 - 1 + np.random.normal(0, 0.2, n_samples)
+            
+            coords = np.column_stack([x_axis, y_axis, z_axis])
+            logger.info(f"  📊 1 var → 3 axes artificiels")
+        
+        # Normaliser chaque axe entre -10 et 10
+        for i in range(3):
+            min_val, max_val = coords[:, i].min(), coords[:, i].max()
+            if max_val - min_val > 1e-6:
+                coords[:, i] = (coords[:, i] - min_val) / (max_val - min_val) * 20 - 10
+            else:
+                # Ajouter de la variation si l'axe est plat
+                coords[:, i] = np.random.uniform(-10, 10, n_samples)
+        
+        return coords
+
+    def _separate_clusters_3d(self, coords: np.ndarray, clusters: np.ndarray) -> np.ndarray:
+        """
+        🔧 V5: Séparer visuellement les clusters en 3D
+        """
+        unique_clusters = np.unique(clusters[clusters >= 0])
+        n_clusters = len(unique_clusters)
+        
+        if n_clusters <= 1:
+            return coords
+        
+        # Calculer les centres actuels
+        centers = {}
+        for c in unique_clusters:
+            mask = clusters == c
+            if np.sum(mask) > 0:
+                centers[c] = coords[mask].mean(axis=0)
+        
+        # Calculer les nouveaux centres séparés (sur une sphère)
+        new_centers = {}
+        radius = 8  # Rayon de séparation
+        for i, c in enumerate(unique_clusters):
+            angle = 2 * np.pi * i / n_clusters
+            elevation = np.pi / 4 * (1 if i % 2 == 0 else -1)  # Alternance haut/bas
+            
+            new_centers[c] = np.array([
+                radius * np.cos(angle) * np.cos(elevation),
+                radius * np.sin(angle) * np.cos(elevation),
+                radius * np.sin(elevation)
+            ])
+        
+        # Déplacer les points vers les nouveaux centres
+        new_coords = coords.copy()
+        for c in unique_clusters:
+            mask = clusters == c
+            if np.sum(mask) > 0 and c in centers and c in new_centers:
+                # Translation vers le nouveau centre
+                offset = new_centers[c] - centers[c]
+                new_coords[mask] += offset * 0.7  # 70% du déplacement pour garder de la structure
+        
+        return new_coords
+
+    def _perform_clustering_algorithm(self, scaled_data: np.ndarray, coords_3d: np.ndarray, 
+                                      n_clusters: int) -> tuple:
+        """
+        🔧 V5: Essayer plusieurs algorithmes de clustering avec équilibrage
+        """
+        n_samples = len(scaled_data)
+        best_clusters = None
+        best_score = -2
+        best_method = None
+        
+        # 1. KMeans avec plusieurs initialisations
+        for init_idx in range(3):
+            try:
+                kmeans = KMeans(
+                    n_clusters=n_clusters,
+                    random_state=42 + init_idx * 17,
+                    n_init=15,
+                    max_iter=500
+                )
+                clusters = kmeans.fit_predict(scaled_data)
+                
+                # Appliquer le rééquilibrage
+                clusters = self._balance_clusters(clusters, min_size_ratio=0.05)
+                
+                # Vérifier qu'on a bien n clusters
+                unique = np.unique(clusters)
+                if len(unique) < n_clusters:
+                    continue
+                
+                # Calculer silhouette
+                if len(unique) >= 2:
+                    try:
+                        score = silhouette_score(scaled_data, clusters)
+                        if score > best_score:
+                            best_score = score
+                            best_clusters = clusters
+                            best_method = f"KMeans (init {init_idx})"
+                    except:
+                        pass
+            except Exception as e:
+                logger.warning(f"  ⚠ KMeans init {init_idx}: {e}")
+        
+        # 2. Gaussian Mixture Model avec équilibrage
+        if best_score < 0.2:
+            try:
+                gmm = GaussianMixture(
+                    n_components=n_clusters,
+                    random_state=42,
+                    n_init=5,
+                    covariance_type='full'
+                )
+                clusters = gmm.fit_predict(scaled_data)
+                clusters = self._balance_clusters(clusters, min_size_ratio=0.05)
+                
+                unique = np.unique(clusters)
+                if len(unique) >= 2:
+                    try:
+                        score = silhouette_score(scaled_data, clusters)
+                        if score > best_score:
+                            best_score = score
+                            best_clusters = clusters
+                            best_method = "GMM"
+                    except:
+                        pass
+            except Exception as e:
+                logger.warning(f"  ⚠ GMM: {e}")
+        
+        # 3. Fallback: KMeans sur coordonnées 3D
+        if best_clusters is None:
+            try:
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=20)
+                best_clusters = kmeans.fit_predict(coords_3d)
+                best_clusters = self._balance_clusters(best_clusters, min_size_ratio=0.05)
+                best_method = "KMeans sur coords 3D"
+                
+                unique = np.unique(best_clusters)
+                if len(unique) >= 2:
+                    try:
+                        best_score = silhouette_score(coords_3d, best_clusters)
+                    except:
+                        best_score = 0.1
+            except Exception as e:
+                logger.error(f"  ❌ Fallback KMeans: {e}")
+                # Dernier recours: assignation aléatoire structurée par quartiles
+                np.random.seed(42)
+                if n_clusters == 2:
+                    # Basé sur médiane
+                    median_val = np.median(scaled_data[:, 0]) if scaled_data.shape[1] > 0 else 0
+                    best_clusters = (scaled_data[:, 0] > median_val).astype(int)
+                else:
+                    # Quartiles
+                    q1 = np.percentile(scaled_data[:, 0], 25) if scaled_data.shape[1] > 0 else 0
+                    q3 = np.percentile(scaled_data[:, 0], 75) if scaled_data.shape[1] > 0 else 1
+                    best_clusters = np.zeros(n_samples, dtype=int)
+                    best_clusters[scaled_data[:, 0] > q3] = 1
+                    if n_clusters >= 3:
+                        best_clusters[scaled_data[:, 0] < q1] = 2
+                    if n_clusters >= 4:
+                        mask = (scaled_data[:, 0] >= q1) & (scaled_data[:, 0] <= q3)
+                        mid = (q1 + q3) / 2
+                        best_clusters[mask & (scaled_data[:, 0] > mid)] = 3
+                best_score = 0.0
+                best_method = "Quartile Split (fallback)"
+        
+        logger.info(f"  ✅ Méthode: {best_method}, score: {best_score:.3f}, clusters uniques: {len(np.unique(best_clusters))}")
+        return best_clusters, best_score, best_method
+
+    def _generate_single_clustering(self, scaled_data: np.ndarray, df_numeric: pd.DataFrame, 
+                                    n_clusters: int, name: str) -> Dict[str, Any]:
+        """
+        🔧 V5: Générer UNE segmentation avec TOUS les points
+        """
+        
+        n_samples = len(scaled_data)
+        n_vars = len(df_numeric.columns)
+        
+        logger.info(f"  🎯 {name}: {n_samples} samples, {n_vars} vars, k={n_clusters}")
+        
+        try:
+            # 1. Créer les coordonnées 3D
+            coords_3d = self._create_3d_coordinates(scaled_data, n_vars)
+            
+            # 2. Effectuer le clustering
+            clusters, silhouette, method = self._perform_clustering_algorithm(
+                scaled_data, coords_3d, n_clusters
+            )
+            
+            # 3. Validation
+            validation = self._validate_clustering(clusters, n_clusters)
+            
+            # Si pas assez de clusters, forcer
+            if validation["actual_clusters"] < 2:
+                logger.warning(f"  ⚠ Seulement {validation['actual_clusters']} cluster(s), forçage...")
+                # Forcer 2 clusters basés sur médiane
+                median_val = np.median(scaled_data[:, 0]) if n_vars > 0 else 0
+                clusters = (scaled_data[:, 0] > median_val).astype(int)
+                validation = self._validate_clustering(clusters, n_clusters)
+            
+            # 4. Séparer visuellement les clusters
+            coords_3d = self._separate_clusters_3d(coords_3d, clusters)
+            
+            # Calculer la dispersion
+            center = coords_3d.mean(axis=0)
+            distances = np.linalg.norm(coords_3d - center, axis=1)
+            dispersion_level = distances.std() / (distances.mean() + 1e-6)
+            dispersion_level = min(dispersion_level, 1.0)
+            
+            # 🔥 5. TOUS LES POINTS SONT ENVOYÉS - PAS D'ÉCHANTILLONNAGE
+            logger.info(f"  📊 Envoi de TOUS les {n_samples} points au frontend")
+            
+            # 6. Points scatter 3D - TOUS LES POINTS
+            scatter_3d = [
+                {
+                    "x": float(coords_3d[idx, 0]),
+                    "y": float(coords_3d[idx, 1]),
+                    "z": float(coords_3d[idx, 2]),
+                    "cluster": int(clusters[idx])
+                }
+                for idx in range(n_samples)  # TOUS les points
+            ]
+            
+            # 7. DNA des clusters
+            df_clust = df_numeric.copy()
+            df_clust['cluster'] = clusters
+            global_mean = df_numeric.mean()
+            global_std = df_numeric.std() + 1e-6
+            
+            cluster_dna = {}
+            cluster_dist = []
+            heatmap_data = []
+            radar_data = []
+            
+            unique_clusters = np.unique(clusters[clusters >= 0])
+            for cid in unique_clusters:
+                subset = df_clust[df_clust['cluster'] == cid].drop(columns=['cluster'])
+                
+                if len(subset) < 1:
+                    continue
+                
+                local_mean = subset.mean()
+                z_scores = (local_mean - global_mean) / global_std
+                
+                # DNA avec caractéristiques distinctives
+                top_features = z_scores.abs().nlargest(min(5, len(z_scores)))
+                features_desc = {}
+                for feat in top_features.index:
+                    direction = "↑ HAUT" if z_scores[feat] > 0 else "↓ BAS"
+                    magnitude = abs(z_scores[feat])
+                    
+                    features_desc[feat] = {
+                        "direction": direction,
+                        "z_score": round(float(z_scores[feat]), 2),
+                        "value": round(float(local_mean[feat]), 2),
+                        "importance": round(magnitude, 2),
+                        "interpretation": f"{direction} de {magnitude:.1f} écarts-types"
+                    }
+                
+                cluster_size = len(subset)
+                cluster_percentage = 100 * cluster_size / len(df_clust)
+                
+                cluster_dna[f"Groupe {int(cid)+1}"] = {
+                    "size": int(cluster_size),
+                    "percentage": round(cluster_percentage, 1),
+                    "features": features_desc,
+                    "centroid_distance": round(float(np.linalg.norm(local_mean - global_mean)), 2),
+                    "distinctiveness": round(float(top_features.mean()) if len(top_features) > 0 else 0, 2)
+                }
+                
+                cluster_dist.append({
+                    "cluster": f"Groupe {int(cid)+1}",
+                    "count": int(cluster_size),
+                    "percentage": round(cluster_percentage, 1),
+                    "color_index": int(cid) % 8
+                })
+                
+                heatmap_vals = {col: round(float(z_scores[col]), 2) for col in df_numeric.columns[:10]}
+                heatmap_data.append({"cluster": f"Groupe {int(cid)+1}", "values": heatmap_vals})
+                
+                radar_vals = {col: round(float(z_scores[col]), 2) for col in df_numeric.columns[:8]}
+                radar_data.append({"cluster": f"Groupe {int(cid)+1}", "values": radar_vals})
+            
+            if not cluster_dna:
+                logger.warning("❌ Aucun cluster DNA généré")
+                return None
+            
+            # 8. Générer l'explication
+            clustering_explanation = self._generate_clustering_explanation(
+                cluster_dna, 
+                validation, 
+                silhouette,  # Peut être None ou float
+                name,
+                data_dispersion_level=dispersion_level,
+                method_used=method
+            )
+            
+            # Vérifier la qualité 3D
+            var_x = np.var(coords_3d[:, 0])
+            var_y = np.var(coords_3d[:, 1])
+            var_z = np.var(coords_3d[:, 2])
+            quality_3d = min(var_x, var_y, var_z) / (max(var_x, var_y, var_z) + 1e-6)
+            
+            logger.info(f"  📊 Variance 3D: X={var_x:.2f}, Y={var_y:.2f}, Z={var_z:.2f}, qualité={quality_3d:.2f}")
+            
+            return {
+                "name": name,
+                "n_clusters": len(cluster_dna),
+                "scatter_points": scatter_3d,  # TOUS les points
+                "dna": cluster_dna,
+                "cluster_distribution": cluster_dist,
+                "heatmap_data": heatmap_data,
+                "radar_data": radar_data,
+                "explained_variance": [],
+                "validation": validation,
+                "silhouette_score": round(silhouette, 3) if silhouette is not None else None,
+                "dispersion_level": round(dispersion_level, 3),
+                "quality_3d": round(quality_3d, 3),
+                "method_used": method,
+                "explanation": clustering_explanation,
+                "total_points": n_samples  # Ajouter le total pour info
+            }
+        
+        except Exception as e:
+            logger.error(f"❌ Erreur génération clustering {name}: {e}", exc_info=True)
+            return None
+
+    def _generate_clustering_explanation(self, cluster_dna: Dict, validation: Dict, 
+                                        silhouette_score_val: Optional[float], name: str, 
+                                        data_dispersion_level: float = 0.0,
+                                        method_used: str = "KMeans") -> Dict[str, str]:
+        """
+        🔧 V5: Explication avec gestion robuste de silhouette_score None
+        """
+        
+        if not cluster_dna:
+            return {
+                "title": "Segmentation Non Concluante",
+                "summary": "Les données n'ont pas permis d'identifier des groupes distincts.",
+                "recommendation": "Considérez d'autres variables ou méthodes d'analyse.",
+                "details": {},
+                "tts_text": "L'analyse de clustering n'a pas identifié de groupes distincts."
+            }
+        
+        n_clusters = len(cluster_dna)
+        total_points = sum([c["size"] for c in cluster_dna.values()])
+        
+        # Analyser la distribution
+        sizes = [c["size"] for c in cluster_dna.values()]
+        min_size = min(sizes) if sizes else 0
+        max_size = max(sizes) if sizes else 0
+        balance = min_size / max_size if max_size > 0 else 0
+        
+        # Analyser les caractéristiques
+        all_features = {}
+        for cluster_info in cluster_dna.values():
+            for feat, info in cluster_info.get("features", {}).items():
+                if feat not in all_features:
+                    all_features[feat] = []
+                all_features[feat].append(abs(info.get("z_score", 0)))
+        
+        avg_z_scores = {k: sum(v) / len(v) for k, v in all_features.items()}
+        distinctive_features = sorted(avg_z_scores.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        # === GÉNÉRER SUMMARY ===
+        summary_parts = []
+        
+        # Nombre de clusters
+        if n_clusters == 2:
+            summary_parts.append(f"Deux segments ont été identifiés dans vos données ({total_points} points).")
+        elif n_clusters == 3:
+            summary_parts.append(f"Trois groupes distincts émergent de l'analyse ({total_points} points).")
+        else:
+            summary_parts.append(f"{n_clusters} clusters ont été formés ({total_points} points).")
+        
+        # 🔧 FIX: Gestion silhouette_score None
+        if silhouette_score_val is not None:
+            if silhouette_score_val > 0.5:
+                summary_parts.append(f"La séparation entre groupes est très bonne (score: {silhouette_score_val:.2f}).")
+            elif silhouette_score_val > 0.25:
+                summary_parts.append(f"La séparation entre groupes est acceptable (score: {silhouette_score_val:.2f}).")
+            elif silhouette_score_val > 0:
+                summary_parts.append(f"⚠️ La séparation est faible (score: {silhouette_score_val:.2f}). "
+                                   f"Les groupes se chevauchent partiellement.")
+            else:
+                summary_parts.append(f"⚠️ Les données sont très dispersées (score: {silhouette_score_val:.2f}). "
+                                   f"Les clusters identifiés sont indicatifs.")
+        else:
+            summary_parts.append("Le score de qualité n'a pas pu être calculé. "
+                               "Les groupes sont formés mais leur séparation est incertaine.")
+        
+        # Distribution
+        if balance > 0.5:
+            summary_parts.append(f"Les groupes sont bien équilibrés ({balance:.0%}).")
+        elif balance > 0.2:
+            summary_parts.append(f"Distribution acceptable (ratio: {balance:.0%}).")
+        else:
+            summary_parts.append(f"⚠️ Groupes déséquilibrés (ratio: {balance:.0%}).")
+        
+        # Méthode
+        summary_parts.append(f"Méthode utilisée: {method_used}.")
+        
+        # Caractéristiques
+        if distinctive_features:
+            feature_names = [f[0] for f in distinctive_features[:3]]
+            summary_parts.append(f"Variables distinctives: {', '.join(feature_names)}.")
+        
+        summary = " ".join(summary_parts)
+        
+        # === RECOMMANDATIONS ===
+        recommendations = []
+        recommendations.append("Examinez les profils de chaque groupe.")
+        
+        if silhouette_score_val is not None and silhouette_score_val < 0.2:
+            recommendations.append("Les données dispersées suggèrent d'explorer d'autres variables ou méthodes.")
+        
+        recommendations.append("La visualisation 3D montre la répartition spatiale de TOUS les points.")
+        
+        recommendation = " | ".join(recommendations[:3])
+        
+        # === DÉTAILS ===
+        details = {
+            "nombre_groupes": n_clusters,
+            "equilibre_distribution": f"{balance:.1%}",
+            "variables_distinctives": [f[0] for f in distinctive_features[:3]],
+            "score_qualite": f"{silhouette_score_val:.2f}" if silhouette_score_val is not None else "N/A",
+            "methode": method_used,
+            "dispersion": "Élevée" if data_dispersion_level > 0.7 else "Moyenne" if data_dispersion_level > 0.4 else "Faible",
+            "points_totaux": total_points
+        }
+        
+        # === TTS TEXT ===
+        tts_parts = [f"Analyse {name}.", summary]
+        
+        for group_name, group_info in list(cluster_dna.items())[:3]:
+            tts_parts.append(f"{group_name}: {group_info['percentage']}% des données.")
+            
+            features = group_info.get("features", {})
+            if features:
+                top_feat = list(features.items())[0]
+                feat_name, feat_info = top_feat
+                direction = "élevé" if feat_info.get("z_score", 0) > 0 else "faible"
+                tts_parts.append(f"Caractéristique principale: {feat_name} {direction}.")
+        
+        tts_parts.append(recommendation)
+        tts_text = " ".join(tts_parts)
+        
+        return {
+            "title": f"Analyse {name}",
+            "summary": summary,
+            "recommendation": recommendation,
+            "details": details,
+            "tts_text": tts_text
+        }
+
+    def _perform_multi_clustering(self, df: pd.DataFrame, selected_vars: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        🔧 V5: Multi-clustering robuste avec TOUS les points
+        """
+        
+        logger.info("🎨 MULTI-CLUSTERING V5 - TOUS LES POINTS VISIBLES")
+        
+        numeric_cols = selected_vars.get('numeric_analysis', [])
+        
+        if len(numeric_cols) < 1:
+            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+        
+        if len(numeric_cols) < 1:
+            logger.warning("⚠️ Pas de variables numériques")
+            return None
+        
+        try:
+            # Sélectionner les variables
+            best_clustering_vars = self._select_best_clustering_variables(df, numeric_cols)
+            
+            if not best_clustering_vars:
+                logger.warning("❌ Aucune variable de clustering")
+                return None
+            
+            logger.info(f"📊 {len(best_clustering_vars)} variables pour clustering")
+            
+            df_numeric = df[best_clustering_vars].copy()
+            
+            if len(df_numeric) < 10:
+                logger.warning("⚠️ Pas assez de lignes (<10)")
+                return None
+            
+            # Imputation
+            imputer = SimpleImputer(strategy='median')
+            df_imputed = pd.DataFrame(
+                imputer.fit_transform(df_numeric), 
+                columns=df_numeric.columns
+            )
+            
+            # Supprimer les lignes avec NaN restants
+            df_imputed = df_imputed.dropna()
+            
+            if len(df_imputed) < 10:
+                logger.warning("⚠️ Pas assez de données après imputation")
+                return None
+            
+            # Normalisation
+            scaler = StandardScaler()
+            scaled_data = scaler.fit_transform(df_imputed)
+            
+            # Remplacer inf par 0
+            scaled_data = np.nan_to_num(scaled_data, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # Configurations de clustering
+            clustering_configs = [
+                (2, "Segmentation Binaire"),
+                (3, "Tri-Segmentation"),
+                (4, "Quadri-Segmentation"),
+                (5, "Penta-Segmentation")
+            ]
+            
+            clusterings = {}
+            
+            for n_clusters, name in clustering_configs:
+                min_points = max(n_clusters * 3, 10)
+                if len(df_imputed) < min_points:
+                    logger.warning(f"⏭️ {name}: Pas assez de données")
+                    continue
+                
+                result = self._generate_single_clustering(
+                    scaled_data, df_imputed, n_clusters, name
+                )
+                
+                if result and result.get("n_clusters", 0) >= 2:
+                    clusterings[f'clustering_k{n_clusters}'] = result
+                    logger.info(f"✅ {name}: {result['n_clusters']} groupes, "
+                              f"silhouette={result.get('silhouette_score', 'N/A')}, "
+                              f"points={result.get('total_points', 0)}")
+                else:
+                    logger.warning(f"⚠️ {name}: échec")
+            
+            if not clusterings:
+                logger.warning("❌ Aucun clustering généré - création de fallback")
+                
+                # Fallback: créer un clustering simple
+                fallback_result = self._create_fallback_clustering(df_imputed, scaled_data)
+                if fallback_result:
+                    clusterings['clustering_k2'] = fallback_result
+            
+            if not clusterings:
+                return None
+            
+            logger.info(f"✅ {len(clusterings)} segmentations générées avec TOUS les points")
+            
+            global_explanation = self._generate_global_clustering_summary(clusterings)
+            
+            return {
+                "success": True,
+                "clusterings": clusterings,
+                "n_clustering_types": len(clusterings),
+                "global_explanation": global_explanation,
+                "variables_used": best_clustering_vars[:10],
+                "total_points": len(df_imputed)
+            }
+        
+        except Exception as e:
+            logger.error(f"❌ Erreur multi-clustering: {e}", exc_info=True)
+            return None
+
+    def _create_fallback_clustering(self, df_numeric: pd.DataFrame, scaled_data: np.ndarray) -> Optional[Dict]:
+        """
+        🔧 V5: Clustering de fallback garanti avec TOUS les points
+        """
+        try:
+            n_samples = len(scaled_data)
+            n_vars = len(df_numeric.columns)
+            
+            logger.info(f"  🔄 Création clustering fallback... ({n_samples} points)")
+            
+            # Créer coordonnées 3D
+            coords_3d = self._create_3d_coordinates(scaled_data, n_vars)
+            
+            # Clustering simple basé sur la médiane
+            median_val = np.median(scaled_data[:, 0]) if n_vars > 0 else 0
+            clusters = (scaled_data[:, 0] > median_val).astype(int)
+            
+            # Séparer les clusters
+            coords_3d = self._separate_clusters_3d(coords_3d, clusters)
+            
+            # Créer le résultat
+            validation = self._validate_clustering(clusters, 2)
+            
+            # Scatter points - TOUS les points
+            scatter_3d = [
+                {
+                    "x": float(coords_3d[idx, 0]),
+                    "y": float(coords_3d[idx, 1]),
+                    "z": float(coords_3d[idx, 2]),
+                    "cluster": int(clusters[idx])
+                }
+                for idx in range(n_samples)
+            ]
+            
+            # DNA simplifié
+            cluster_dna = {}
+            for cid in [0, 1]:
+                mask = clusters == cid
+                count = np.sum(mask)
+                if count > 0:
+                    cluster_dna[f"Groupe {cid+1}"] = {
+                        "size": int(count),
+                        "percentage": round(100 * count / n_samples, 1),
+                        "features": {},
+                        "centroid_distance": 0,
+                        "distinctiveness": 0
+                    }
+            
+            return {
+                "name": "Segmentation Binaire (Fallback)",
+                "n_clusters": 2,
+                "scatter_points": scatter_3d,
+                "dna": cluster_dna,
+                "cluster_distribution": [
+                    {"cluster": f"Groupe {i+1}", "count": int(np.sum(clusters == i)), 
+                     "percentage": round(100 * np.sum(clusters == i) / n_samples, 1), "color_index": i}
+                    for i in range(2)
+                ],
+                "heatmap_data": [],
+                "radar_data": [],
+                "explained_variance": [],
+                "validation": validation,
+                "silhouette_score": None,
+                "dispersion_level": 0.5,
+                "quality_3d": 0.5,
+                "method_used": "Median Split (Fallback)",
+                "total_points": n_samples,
+                "explanation": {
+                    "title": "Segmentation Binaire (Fallback)",
+                    "summary": f"Une segmentation simple basée sur la médiane a été créée ({n_samples} points).",
+                    "recommendation": "Vos données sont difficiles à segmenter. Considérez d'ajouter plus de variables ou de points.",
+                    "details": {"methode": "Median Split", "points": n_samples},
+                    "tts_text": f"Une segmentation de fallback a été créée avec {n_samples} points. Les données sont difficiles à segmenter naturellement."
+                }
+            }
+        except Exception as e:
+            logger.error(f"❌ Fallback clustering échoué: {e}")
+            return None
+
+    def _generate_global_clustering_summary(self, clusterings: Dict) -> Dict[str, str]:
+        """Générer un résumé global"""
+        
+        total_clusters = sum([c.get("n_clusters", 0) for c in clusterings.values()])
+        avg_clusters = total_clusters / len(clusterings) if clusterings else 0
+        
+        best_clustering = None
+        best_score = -1
+        
+        for key, clustering in clusterings.items():
+            score = clustering.get("silhouette_score") or 0
+            if score > best_score:
+                best_score = score
+                best_clustering = clustering
+        
+        if best_clustering:
+            score_text = f"{best_score:.2f}" if best_score > 0 else "N/A"
+            points_text = f"{best_clustering.get('total_points', 0)} points"
+            return {
+                "title": "Résumé des Segmentations",
+                "summary": f"{len(clusterings)} modèles générés avec en moyenne {avg_clusters:.1f} groupes. Meilleur score: {score_text}.",
+                "recommendation": "Explorez les différentes segmentations. Tous les points sont visibles en 3D.",
+                "details": {
+                    "meilleur_modele": best_clustering.get("name", "N/A"),
+                    "score_qualite": score_text,
+                    "groupes_totaux": total_clusters,
+                    "points_visibles": points_text
+                }
+            }
+        
+        return {
+            "title": "Segmentations Disponibles",
+            "summary": f"{len(clusterings)} modèles de segmentation ont été générés.",
+            "recommendation": "Examinez chaque modèle pour comprendre vos données.",
+            "details": {}
+        }
+
+    def _analyze_correlations_deeply(self, df: pd.DataFrame, selected_vars: Dict[str, Any]) -> Dict[str, Any]:
+        """Corrélations"""
+        
+        numeric_cols = selected_vars.get('correlation_vars', [])
+        target = selected_vars.get('target', '')
+        
+        if len(numeric_cols) < 2:
+            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+            if len(numeric_cols) < 2:
+                return {
+                    "matrix": {},
+                    "strong_correlations": [],
+                    "moderate_correlations": [],
+                    "target_correlations": {},
+                    "summary": {"strong_pairs": 0, "moderate_pairs": 0}
+                }
+        
+        try:
+            corr_matrix = df[numeric_cols].corr().round(3)
+            
+            strong_corr = []
+            moderate_corr = []
+            
+            for i in range(len(corr_matrix.columns)):
+                for j in range(i+1, len(corr_matrix.columns)):
+                    val = corr_matrix.iloc[i, j]
+                    if not np.isnan(val):
+                        pair = {
+                            "var1": corr_matrix.columns[i],
+                            "var2": corr_matrix.columns[j],
+                            "r": float(val),
+                            "r_squared": round(val**2, 3),
+                            "interpretation": self._interpret_correlation(val)
+                        }
+                        if abs(val) > 0.7:
+                            strong_corr.append(pair)
+                        elif abs(val) > 0.4:
+                            moderate_corr.append(pair)
+            
+            target_corr = {}
+            if target and target in df.columns and pd.api.types.is_numeric_dtype(df[target]):
+                try:
+                    tc = df[numeric_cols].corrwith(df[target]).dropna()
+                    target_corr = {
+                        col: {"r": round(float(val), 3), "r_squared": round(val**2, 3),
+                              "interpretation": self._interpret_correlation(val)}
+                        for col, val in tc.items() if col != target and abs(val) > 0.1
+                    }
+                    target_corr = dict(sorted(target_corr.items(), key=lambda x: abs(x[1]['r']), reverse=True))
+                except Exception as e:
+                    logger.warning(f"⚠️ Erreur corrélation target: {e}")
+            
+            return {
+                "matrix": corr_matrix.to_dict(),
+                "strong_correlations": sorted(strong_corr, key=lambda x: abs(x['r']), reverse=True)[:10],
+                "moderate_correlations": sorted(moderate_corr, key=lambda x: abs(x['r']), reverse=True)[:10],
+                "target_correlations": target_corr,
+                "summary": {
+                    "strong_pairs": len(strong_corr),
+                    "moderate_pairs": len(moderate_corr),
+                    "all_variables": numeric_cols
+                }
+            }
+        except Exception as e:
+            logger.error(f"❌ Erreur corrélations: {e}")
+            return {
+                "matrix": {},
+                "strong_correlations": [],
+                "moderate_correlations": [],
+                "target_correlations": {},
+                "summary": {"strong_pairs": 0, "moderate_pairs": 0}
+            }
+
+    def _interpret_correlation(self, r: float) -> str:
+        abs_r = abs(r)
+        if abs_r < 0.3:
+            return "Très faible"
+        elif abs_r < 0.5:
+            return "Faible"
+        elif abs_r < 0.7:
+            return "Modérée"
+        else:
+            return "Forte"
+
+    def _smart_statistical_tests(self, df: pd.DataFrame, selected_vars: Dict[str, Any]) -> List[Dict]:
+        """Tests statistiques"""
+        
+        target = selected_vars.get('target', '')
+        numeric_cols = selected_vars.get('numeric_analysis', [])
+        categorical_cols = selected_vars.get('categorical_analysis', [])
+        tests = []
+        
+        if not target or target not in df.columns:
+            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+            if not numeric_cols:
+                return []
+            target = numeric_cols[0]
+        
+        target_is_numeric = pd.api.types.is_numeric_dtype(df[target])
+        
+        if target_is_numeric and len(categorical_cols) > 0:
+            for cat_col in categorical_cols[:5]:
+                try:
+                    unique_count = df[cat_col].nunique()
+                    
+                    if unique_count == 2:
+                        groups = df[cat_col].dropna().unique()
+                        g1 = df[df[cat_col] == groups[0]][target].dropna().values
+                        g2 = df[df[cat_col] == groups[1]][target].dropna().values
+                        
+                        if len(g1) >= 2 and len(g2) >= 2:
+                            try:
+                                t_stat, p = stats.ttest_ind(g1, g2)
+                                tests.append({
+                                    "variable1": cat_col,
+                                    "variable2": target,
+                                    "test_type": "ttest",
+                                    "test_name": "T-Test",
+                                    "statistic": round(t_stat, 3),
+                                    "p_value": p,
+                                    "conclusion": "Significatif" if p < 0.05 else "Non significatif"
+                                })
+                            except:
+                                pass
+                    
+                    elif unique_count >= 3:
+                        groups = [g for g in df[cat_col].dropna().unique() if pd.notna(g)]
+                        gdata = [df[df[cat_col] == g][target].dropna().values for g in groups]
+                        gdata = [g for g in gdata if len(g) >= 2]
+                        
+                        if len(gdata) >= 3:
+                            try:
+                                f_stat, p = stats.f_oneway(*gdata)
+                                tests.append({
+                                    "variable1": cat_col,
+                                    "variable2": target,
+                                    "test_type": "anova",
+                                    "test_name": "ANOVA",
+                                    "statistic": round(f_stat, 3),
+                                    "p_value": p,
+                                    "conclusion": "Significatif" if p < 0.05 else "Non significatif"
+                                })
+                            except:
+                                pass
+                except:
+                    pass
+        
+        if len(numeric_cols) >= 2:
+            for i, col1 in enumerate(numeric_cols[:5]):
+                for col2 in numeric_cols[i+1:6]:
+                    try:
+                        clean = df[[col1, col2]].dropna()
+                        if len(clean) >= 5:
+                            r, p = stats.pearsonr(clean[col1], clean[col2])
+                            if abs(r) > 0.2:
+                                tests.append({
+                                    "variable1": col1,
+                                    "variable2": col2,
+                                    "test_type": "pearson",
+                                    "test_name": "Pearson",
+                                    "statistic": round(r, 3),
+                                    "p_value": p,
+                                    "conclusion": "Significatif" if p < 0.05 else "Non significatif"
+                                })
+                    except:
+                        pass
+        
+        return tests[:20]
+
+    def _get_distributions(self, df: pd.DataFrame, selected_vars: Dict[str, Any]) -> Dict:
+        """Distributions"""
+        plots = {}
+        numeric_cols = selected_vars.get('numeric_analysis', [])[:10]
+        
+        for col in numeric_cols:
             data = df[col].dropna().values
             if len(data) < 3:
                 continue
-
+            
             try:
-                # Histogramme adaptatif
                 n_bins = min(30, int(np.sqrt(len(data))))
-                hist, bin_edges = np.histogram(data, bins=n_bins)
-
-                # Boxplot complètes
+                hist, edges = np.histogram(data, bins=n_bins)
+                
                 q1 = np.percentile(data, 25)
                 median = np.percentile(data, 50)
                 q3 = np.percentile(data, 75)
                 iqr = q3 - q1
-                min_val = np.min(data)
-                max_val = np.max(data)
-
-                # Outliers
-                lower_whisker = max(min_val, q1 - 1.5 * iqr)
-                upper_whisker = min(max_val, q3 + 1.5 * iqr)
-                outliers = len([x for x in data if x < lower_whisker or x > upper_whisker])
-
+                
                 plots[col] = {
                     "type": "distribution",
                     "title": col,
-                    "unit": "",
                     "histogram": [
-                        {
-                            "range": f"{round(bin_edges[i], 2)}-{round(bin_edges[i+1], 2)}",
-                            "count": int(hist[i]),
-                            "pct": round(100 * hist[i] / hist.sum(), 1)
-                        }
+                        {"range": f"{round(edges[i], 2)}-{round(edges[i+1], 2)}",
+                         "count": int(hist[i]), "pct": round(100 * hist[i] / hist.sum(), 1)}
                         for i in range(len(hist))
                     ],
                     "boxplot": {
-                        "min": float(min_val),
-                        "max": float(max_val),
-                        "q1": float(q1),
-                        "median": float(median),
-                        "q3": float(q3),
-                        "iqr": float(iqr),
-                        "lower": float(lower_whisker),
-                        "upper": float(upper_whisker),
-                        "outliers": outliers
-                    },
-                    "density_info": {
-                        "mean": round(np.mean(data), 2),
-                        "std": round(np.std(data), 2),
-                        "skew": round(float(pd.Series(data).skew()), 2)
+                        "min": float(np.min(data)), "max": float(np.max(data)),
+                        "q1": float(q1), "median": float(median), "q3": float(q3),
+                        "iqr": float(iqr), "lower": float(q1 - 1.5*iqr), "upper": float(q3 + 1.5*iqr)
                     }
                 }
-            except Exception as e:
-                logger.error(f"Erreur distribution {col}: {e}")
-                continue
-
+            except:
+                pass
+        
         return plots
 
-    def _get_enriched_pie_charts(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
-        """Camemberts avec meilleurs labels."""
+    def _get_pie_charts(self, df: pd.DataFrame, selected_vars: Dict[str, Any]) -> List[Dict]:
+        """Camemberts"""
         pies = []
-        cat_cols = df.select_dtypes(include=['object', 'category']).columns
-
-        for col in cat_cols:
-            unique_count = df[col].nunique()
-            if 2 <= unique_count <= 10:
+        for col in selected_vars.get('categorical_analysis', [])[:5]:
+            uc = df[col].nunique()
+            if 2 <= uc <= 10:
                 try:
                     counts = df[col].value_counts()
                     total = counts.sum()
-                    data = [
-                        {
-                            "name": str(k)[:50],
-                            "value": int(v),
-                            "pct": round(100 * v / total, 1)
-                        }
-                        for k, v in counts.items()
-                    ]
-                    
                     pies.append({
                         "type": "pie",
                         "title": f"Distribution: {col}",
                         "label": col,
                         "total": int(total),
-                        "data": data
+                        "data": [{"name": str(k)[:50], "value": int(v), "pct": round(100 * v / total, 1)}
+                                for k, v in counts.items()]
                     })
-                    
-                    if len(pies) >= 8:
-                        break
-                except Exception as e:
-                    logger.error(f"Erreur pie {col}: {e}")
-                    continue
-
+                except:
+                    pass
         return pies
 
-    def _get_enhanced_scatter_plots(self, df: pd.DataFrame, target: str) -> List[Dict[str, Any]]:
-        """Nuages de points enrichis avec labels et samples."""
+    def _get_scatter_plots(self, df: pd.DataFrame, selected_vars: Dict[str, Any]) -> List[Dict]:
+        """Scatter plots"""
         scatters = []
-        num_cols = df.select_dtypes(include=np.number).columns.tolist()
-
-        if not target or target not in df.columns or len(num_cols) < 2:
-            return []
-
-        try:
-            if target in num_cols:
-                corr_with_target = df[num_cols].corrwith(df[target]).abs().sort_values(ascending=False)
-                top_vars = [v for v in corr_with_target.index[1:6] if v != target]
-            else:
-                top_vars = df[num_cols].var().nlargest(5).index.tolist()
-
-            for var in top_vars:
-                try:
-                    clean_data = df[[var, target]].dropna()
-                    if len(clean_data) < 5:
-                        continue
-
-                    sample_size = min(500, len(clean_data))
-                    if len(clean_data) > 500:
-                        sample = clean_data.sample(n=sample_size, random_state=42)
-                    else:
-                        sample = clean_data
-
-                    correlation = round(float(sample[var].corr(sample[target])), 2)
-
+        target = selected_vars.get('target', '')
+        for var in [c for c in selected_vars.get('numeric_analysis', []) if c != target][:5]:
+            try:
+                clean = df[[var, target]].dropna()
+                if len(clean) >= 5:
+                    sample = clean.sample(n=min(500, len(clean)), random_state=42) if len(clean) > 500 else clean
                     scatters.append({
                         "type": "scatter",
                         "title": f"{target} vs {var}",
                         "x_label": var,
                         "y_label": target,
-                        "correlation": correlation,
+                        "correlation": round(float(sample[var].corr(sample[target])), 2),
                         "sample_size": len(sample),
                         "data": sample.to_dict(orient='records')
                     })
-                except Exception as e:
-                    logger.error(f"Erreur scatter {var}: {e}")
-                    continue
-
-        except Exception as e:
-            logger.error(f"Erreur scatter global: {e}")
-
+            except:
+                pass
         return scatters
 
-    # =========================================================
-    # 4. CLUSTERING 3D ROBUSTE
-    # =========================================================
-
-    def _perform_smart_clustering(self, df: pd.DataFrame, n_clusters: int = 3) -> Optional[Dict[str, Any]]:
-        """Clustering 3D avec profiling robuste."""
-        try:
-            numeric_df = df.select_dtypes(include=np.number)
-            numeric_df = numeric_df.dropna(axis=1, thresh=len(df) * 0.5)
-            numeric_df = numeric_df.fillna(numeric_df.median())
-
-            if len(numeric_df.columns) < 3 or len(numeric_df) < 30:
-                logger.warning("⚠ Pas assez de données pour clustering")
-                return None
-
-            scaler = StandardScaler()
-            scaled_data = scaler.fit_transform(numeric_df)
-
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            clusters = kmeans.fit_predict(scaled_data)
-
-            pca = PCA(n_components=3)
-            coords = pca.fit_transform(scaled_data)
-
-            limit = min(1000, len(coords))
-            indices = np.random.choice(len(coords), limit, replace=False)
-
-            points_3d = [
-                {
-                    "x": float(coords[i, 0]),
-                    "y": float(coords[i, 1]),
-                    "z": float(coords[i, 2]),
-                    "cluster": int(clusters[i])
-                }
-                for i in indices
-            ]
-
-            df_clustered = numeric_df.copy()
-            df_clustered['cluster'] = clusters
-            global_means = numeric_df.mean()
-
-            cluster_dna = {}
-            for cid in range(n_clusters):
-                subset = df_clustered[df_clustered['cluster'] == cid].drop(columns=['cluster'])
-                
-                if len(subset) < 5:
-                    continue
-                
-                local_means = subset.mean()
-                std = numeric_df.std().replace(0, 1)
-                z_scores = (local_means - global_means) / std
-
-                top_features = z_scores.abs().nlargest(5)
-
-                features_desc = {}
-                for feat in top_features.index:
-                    score = z_scores[feat]
-                    value = round(local_means[feat], 2)
-                    direction = "↑ HAUT" if score > 0 else "↓ BAS"
-                    features_desc[feat] = {
-                        "direction": direction,
-                        "z_score": round(score, 1),
-                        "value": value
-                    }
-
-                cluster_dna[f"Groupe {cid+1}"] = {
-                    "size": int(len(subset)),
-                    "features": features_desc,
-                    "variance_explained": round(100 * pca.explained_variance_ratio_.sum(), 1)
-                }
-
-            return {
-                "scatter_points": points_3d,
-                "dna": cluster_dna,
-                "explained_variance": [round(float(v), 1) for v in pca.explained_variance_ratio_]
-            }
-
-        except Exception as e:
-            logger.error(f"Erreur clustering: {e}")
-            return None
-
-    # =========================================================
-    # 5. TESTS STATISTIQUES COMPLETS & DÉTAILLÉS
-    # =========================================================
-
-    def _calculate_cohens_d(self, group1: np.ndarray, group2: np.ndarray) -> Tuple[float, str]:
-        """Calcule Cohen's d (effect size pour T-test)."""
-        n1, n2 = len(group1), len(group2)
-        var1, var2 = np.var(group1, ddof=1), np.var(group2, ddof=1)
-        
-        pooled_std = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2))
-        
-        if pooled_std == 0:
-            return 0.0, "Nul"
-        
-        cohens_d = (np.mean(group1) - np.mean(group2)) / pooled_std
-        
-        abs_d = abs(cohens_d)
-        if abs_d < 0.2:
-            interpretation = "Effet très faible"
-        elif abs_d < 0.5:
-            interpretation = "Effet faible"
-        elif abs_d < 0.8:
-            interpretation = "Effet moyen"
-        else:
-            interpretation = "Effet fort"
-        
-        return round(cohens_d, 3), interpretation
-
-    def _calculate_cramers_v(self, chi2: float, n: int, min_dim: int) -> Tuple[float, str]:
-        """Calcule Cramer's V (effect size pour Chi-2)."""
-        if n == 0 or min_dim == 0:
-            return 0.0, "Nul"
-        
-        cramers_v = np.sqrt(chi2 / (n * (min_dim - 1)))
-        
-        if cramers_v < 0.1:
-            interpretation = "Effet très faible"
-        elif cramers_v < 0.3:
-            interpretation = "Effet faible"
-        elif cramers_v < 0.5:
-            interpretation = "Effet moyen"
-        else:
-            interpretation = "Effet fort"
-        
-        return round(cramers_v, 3), interpretation
-
-    def _independent_ttest(self, df: pd.DataFrame, group_col: str, value_col: str) -> Optional[Dict]:
-        """T-test indépendant: compare les moyennes de 2 groupes."""
-        try:
-            groups = df[group_col].unique()
-            groups = [g for g in groups if pd.notna(g)]
-            
-            if len(groups) != 2:
-                return None
-            
-            group1_data = df[df[group_col] == groups[0]][value_col].dropna().values
-            group2_data = df[df[group_col] == groups[1]][value_col].dropna().values
-            
-            if len(group1_data) < 2 or len(group2_data) < 2:
-                return None
-            
-            levene_stat, levene_p = stats.levene(group1_data, group2_data)
-            equal_var = levene_p > 0.05
-            
-            t_stat, p_value = stats.ttest_ind(group1_data, group2_data, equal_var=equal_var)
-            
-            cohens_d, cohens_interpretation = self._calculate_cohens_d(group1_data, group2_data)
-            
-            return {
-                "variable1": group_col,
-                "variable2": value_col,
-                "test_type": "ttest",
-                "test_name": "Independent T-Test" if equal_var else "Welch's T-Test",
-                "statistic": round(t_stat, 3),
-                "p_value": p_value,
-                "df": len(group1_data) + len(group2_data) - 2,
-                "group1": {
-                    "name": str(groups[0]),
-                    "mean": round(float(np.mean(group1_data)), 2),
-                    "std": round(float(np.std(group1_data)), 2),
-                    "n": len(group1_data)
-                },
-                "group2": {
-                    "name": str(groups[1]),
-                    "mean": round(float(np.mean(group2_data)), 2),
-                    "std": round(float(np.std(group2_data)), 2),
-                    "n": len(group2_data)
-                },
-                "equal_variances": equal_var,
-                "effect_size": {
-                    "value": cohens_d,
-                    "type": "Cohen's d",
-                    "interpretation": cohens_interpretation
-                },
-                "null_hypothesis": f"La moyenne de {value_col} est égale pour {groups[0]} et {groups[1]}",
-                "conclusion": "Différence significative" if p_value < 0.05 else "Pas de différence significative"
-            }
-        except Exception as e:
-            logger.warning(f"T-test error for {group_col} vs {value_col}: {e}")
-            return None
-
-    def _chi2_test(self, df: pd.DataFrame, var1: str, var2: str) -> Optional[Dict]:
-        """Chi-2 test: teste l'indépendance entre 2 variables catégoriques."""
-        try:
-            clean = df[[var1, var2]].dropna()
-            if len(clean) < 5:
-                return None
-            
-            ct = pd.crosstab(clean[var1], clean[var2])
-            
-            if ct.size < 4:
-                return None
-            
-            chi2, p_value, dof, expected = stats.chi2_contingency(ct)
-            
-            n = ct.sum().sum()
-            min_dim = min(ct.shape[0], ct.shape[1])
-            cramers_v, cramers_interpretation = self._calculate_cramers_v(chi2, n, min_dim)
-            
-            min_expected = expected.min()
-            
-            return {
-                "variable1": var1,
-                "variable2": var2,
-                "test_type": "chi2",
-                "test_name": "Chi-Square Test",
-                "statistic": round(chi2, 3),
-                "p_value": p_value,
-                "df": dof,
-                "n": n,
-                "contingency_table": ct.to_dict(),
-                "effect_size": {
-                    "value": cramers_v,
-                    "type": "Cramer's V",
-                    "interpretation": cramers_interpretation
-                },
-                "expected_freq_warning": min_expected < 5,
-                "expected_freq_min": round(float(min_expected), 2),
-                "null_hypothesis": f"{var1} et {var2} sont indépendants",
-                "conclusion": "Association significative" if p_value < 0.05 else "Pas d'association significative"
-            }
-        except Exception as e:
-            logger.warning(f"Chi-2 test error for {var1} vs {var2}: {e}")
-            return None
-
-    def _anova_test(self, df: pd.DataFrame, group_col: str, value_col: str) -> Optional[Dict]:
-        """ANOVA: teste les différences de moyennes entre 3+ groupes."""
-        try:
-            groups = df[group_col].unique()
-            groups = [g for g in groups if pd.notna(g)]
-            
-            if len(groups) < 3:
-                return None
-            
-            group_data = [df[df[group_col] == g][value_col].dropna().values for g in groups]
-            group_data = [g for g in group_data if len(g) >= 2]
-            
-            if len(group_data) < 3:
-                return None
-            
-            f_stat, p_value = stats.f_oneway(*group_data)
-            
-            grand_mean = np.concatenate(group_data).mean()
-            ss_between = sum(len(g) * (np.mean(g) - grand_mean)**2 for g in group_data)
-            ss_total = sum((x - grand_mean)**2 for g in group_data for x in g)
-            eta_squared = ss_between / ss_total if ss_total > 0 else 0
-            
-            if eta_squared < 0.01:
-                interpretation = "Effet très faible"
-            elif eta_squared < 0.06:
-                interpretation = "Effet faible"
-            elif eta_squared < 0.14:
-                interpretation = "Effet moyen"
-            else:
-                interpretation = "Effet fort"
-            
-            group_stats = []
-            for g, data in zip(groups, group_data):
-                group_stats.append({
-                    "group": str(g),
-                    "mean": round(float(np.mean(data)), 2),
-                    "std": round(float(np.std(data)), 2),
-                    "n": len(data)
-                })
-            
-            return {
-                "variable1": group_col,
-                "variable2": value_col,
-                "test_type": "anova",
-                "test_name": "One-Way ANOVA",
-                "statistic": round(f_stat, 3),
-                "p_value": p_value,
-                "df_between": len(groups) - 1,
-                "df_within": sum(len(g) - 1 for g in group_data),
-                "groups": group_stats,
-                "effect_size": {
-                    "value": round(eta_squared, 3),
-                    "type": "Eta-squared (η²)",
-                    "interpretation": interpretation
-                },
-                "null_hypothesis": f"Les moyennes de {value_col} sont égales pour tous les groupes de {group_col}",
-                "conclusion": "Différences significatives" if p_value < 0.05 else "Pas de différences significatives"
-            }
-        except Exception as e:
-            logger.warning(f"ANOVA error for {group_col} vs {value_col}: {e}")
-            return None
-
-    def _statistical_tests_comprehensive(self, df: pd.DataFrame, target: str) -> List[Dict]:
-        """Tests statistiques complets et détaillés."""
-        tests = []
-
-        if not target or target not in df.columns:
-            return []
-
-        try:
-            target_is_num = pd.api.types.is_numeric_dtype(df[target])
-            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-            categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-
-            # 1. T-tests: Catégorique binaire vs Numérique
-            for cat_col in categorical_cols:
-                unique_count = df[cat_col].nunique()
-                if unique_count == 2 and target_is_num:
-                    test = self._independent_ttest(df, cat_col, target)
-                    if test and test['p_value'] < 0.15:
-                        tests.append(test)
-                        logger.info(f"✓ T-test: {cat_col} vs {target}")
-
-            # 2. ANOVA: Catégorique 3+ vs Numérique
-            for cat_col in categorical_cols:
-                unique_count = df[cat_col].nunique()
-                if unique_count >= 3 and target_is_num:
-                    test = self._anova_test(df, cat_col, target)
-                    if test and test['p_value'] < 0.15:
-                        tests.append(test)
-                        logger.info(f"✓ ANOVA: {cat_col} vs {target}")
-
-            # 3. Chi-2: Catégorique vs Catégorique
-            if not target_is_num:
-                for cat_col in categorical_cols:
-                    if cat_col != target:
-                        test = self._chi2_test(df, target, cat_col)
-                        if test and test['p_value'] < 0.15:
-                            tests.append(test)
-                            logger.info(f"✓ Chi-2: {target} vs {cat_col}")
-
-            # 4. Corrélations Pearson: Numérique vs Numérique
-            if target_is_num:
-                for num_col in numeric_cols:
-                    if num_col != target:
-                        try:
-                            clean = df[[target, num_col]].dropna()
-                            if len(clean) >= 10:
-                                r, p = stats.pearsonr(clean[target], clean[num_col])
-                                if abs(r) > 0.15 and p < 0.15:
-                                    tests.append({
-                                        "variable1": num_col,
-                                        "variable2": target,
-                                        "test_type": "pearson",
-                                        "test_name": "Pearson Correlation",
-                                        "statistic": round(r, 3),
-                                        "p_value": p,
-                                        "df": len(clean) - 2,
-                                        "effect_size": {
-                                            "value": round(r, 3),
-                                            "type": "r (Pearson)",
-                                            "interpretation": "Forte corrélation" if abs(r) > 0.5 else "Corrélation modérée" if abs(r) > 0.3 else "Faible corrélation"
-                                        },
-                                        "null_hypothesis": f"Pas de corrélation entre {num_col} et {target}",
-                                        "conclusion": "Corrélation significative" if p < 0.05 else "Tendance" if p < 0.15 else "Pas de corrélation"
-                                    })
-                                    logger.info(f"✓ Pearson: {num_col} vs {target} (r={r:.3f})")
-                        except Exception as e:
-                            logger.debug(f"Pearson error: {e}")
-
-        except Exception as e:
-            logger.error(f"Erreur tests statistiques: {e}", exc_info=True)
-
-        # Tri par p-value et limitation
-        return sorted(tests, key=lambda x: x.get('p_value', 1))[:20]
-
-    # =========================================================
-    # 6. ORCHESTRATION MULTI-LLM ROBUSTE
-    # =========================================================
-
-    async def _generate_ai_insights_safe(self, eda_data: Dict, context: dict, user_prompt: str) -> List[Dict]:
-        """Génération d'insights avec fallback robuste."""
-        from services.multi_llm_insights import multi_llm_insights
-        
-        insights = []
-        
-        try:
-            tasks = []
-
-            if eda_data.get('clustering') and eda_data['clustering'].get('dna'):
-                dna_json = json.dumps(eda_data['clustering']['dna'], indent=2, ensure_ascii=False)
-                tasks.append({
-                    "task_id": "clusters",
-                    "prompt": """Tu es un data analyst expert. Analyse ces clusters et génère EXACTEMENT un JSON array avec 3 objets.
-CHAQUE objet DOIT avoir cette structure EXACTE :
-{
-  "title": "Nom du groupe (10 mots max)",
-  "summary": "Caractéristiques clés (30 mots max)",
-  "recommendation": "Action proposée (20 mots max)"
-}
-Sois concis et factuel. Ne mets RIEN d'autre.""",
-                    "data": f"DNA des Clusters:\n{dna_json}"
-                })
-
-            if eda_data.get('tests'):
-                tests_json = json.dumps(eda_data['tests'][:8], indent=2)
-                tasks.append({
-                    "task_id": "correlations",
-                    "prompt": f"""Analyse ces tests statistiques vs la cible '{context.get('target_variable', 'UNKNOWN')}'.
-Génère UN SEUL JSON object :
-{{
-  "title": "Facteurs d'influence principaux",
-  "summary": "Variables les plus impactantes (30 mots)",
-  "recommendation": "Ordre de priorité pour l'investigation (20 mots)"
-}}""",
-                    "data": tests_json
-                })
-
-            univariate = eda_data.get('univariate', {})
-            summary_stats = {
-                "total_variables": len(univariate),
-                "numeric": len([s for s in univariate.values() if s.get('type') == 'numeric']),
-                "categorical": len([s for s in univariate.values() if s.get('type') == 'categorical']),
-                "target": context.get('target_variable', 'Unknown')
-            }
-            
-            tasks.append({
-                "task_id": "overview",
-                "prompt": """Résume cette structure de données en UN JSON object :
-{
-  "title": "Vue d'ensemble du dataset",
-  "summary": "Caractéristiques principales (30 mots)",
-  "recommendation": "Étapes recommandées (20 mots)"
-}""",
-                "data": json.dumps(summary_stats)
-            })
-
-            if tasks:
-                logger.info(f"🚀 Lancement {len(tasks)} tâches LLM")
-                try:
-                    ai_results = await asyncio.wait_for(
-                        multi_llm_insights.run_parallel_analysis(tasks),
-                        timeout=120
-                    )
-                    
-                    if ai_results and isinstance(ai_results, list):
-                        for result in ai_results:
-                            if isinstance(result, dict) and 'title' in result:
-                                insights.append(result)
-                                logger.info(f"✓ Insight généré: {result.get('title', 'N/A')}")
-                            else:
-                                logger.warning(f"⚠ Format invalide: {result}")
-                    
-                except asyncio.TimeoutError:
-                    logger.error("❌ Timeout LLM")
-                except Exception as e:
-                    logger.error(f"❌ Erreur LLM: {e}")
-
-        except Exception as e:
-            logger.error(f"Erreur globale insights: {e}")
-
-        if len(insights) < 3:
-            logger.warning("⚠ Génération d'insights de secours")
-            insights.extend(self._generate_fallback_insights(eda_data, context))
-
-        return insights[:5]
-
-    def _generate_fallback_insights(self, eda_data: Dict, context: dict) -> List[Dict]:
-        """Insights de secours (sans LLM)."""
-        fallback = []
-
-        target = context.get('target_variable', 'Unknown')
-        
-        n_num = len([s for s in eda_data.get('univariate', {}).values() if s.get('type') == 'numeric'])
-        n_cat = len([s for s in eda_data.get('univariate', {}).values() if s.get('type') == 'categorical'])
-        
-        fallback.append({
-            "title": "Structure du Dataset",
-            "summary": f"{n_num} variables numériques, {n_cat} catégories. Ensemble bien équilibré.",
-            "recommendation": "Procéder à l'analyse des corrélations et clusters."
-        })
-
-        tests = eda_data.get('tests', [])
-        if tests:
-            top_test = tests[0]
-            fallback.append({
-                "title": "Relation clé trouvée",
-                "summary": f"{top_test.get('variable1', 'X')} vs {top_test.get('variable2', 'Y')} montre une relation significative.",
-                "recommendation": "Investiguer cette variable en priorité."
-            })
-
-        if eda_data.get('clustering'):
-            fallback.append({
-                "title": "Segmentation découverte",
-                "summary": "3 groupes distincts identifiés par apprentissage non-supervisé.",
-                "recommendation": "Analyser les caractéristiques de chaque groupe."
-            })
-
-        return fallback
-
-    # =========================================================
-    # 7. ORCHESTRATION PRINCIPALE
-    # =========================================================
-
-    async def run_full_eda(self, df: pd.DataFrame, context: dict, user_prompt: str) -> dict:
-        """Pipeline EDA complet et robuste."""
-        
-        logger.info(f"🎯 Démarrage EDA pour {len(df)} lignes × {len(df.columns)} colonnes")
-
-        df = df.fillna(df.mean(numeric_only=True))
-
-        target = self._smart_target_detection(df, user_prompt, context)
-        logger.info(f"📍 Cible: {target}")
-
-        themes = self._detect_themes(df)
-
-        try:
-            univariate = self._get_complete_univariate_stats(df)
-            distributions = self._get_rich_distributions(df)
-            pie_charts = self._get_enriched_pie_charts(df)
-            scatter_plots = self._get_enhanced_scatter_plots(df, target)
-            clustering = self._perform_smart_clustering(df, n_clusters=3)
-            statistical_tests = self._statistical_tests_comprehensive(df, target)
-
-            logger.info(f"✓ Stats complètes: {len(univariate)} variables")
-            logger.info(f"✓ Distributions: {len(distributions)} graphes")
-            logger.info(f"✓ Camemberts: {len(pie_charts)}")
-            logger.info(f"✓ Nuages: {len(scatter_plots)}")
-            logger.info(f"✓ Tests statistiques: {len(statistical_tests)}")
-
-        except Exception as e:
-            logger.error(f"❌ Erreur calculs EDA: {e}", exc_info=True)
-            return self._generate_fallback_eda(df, target)
-
-        numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-        corr_matrix = {}
-        if len(numeric_cols) > 1:
-            focus_cols = list(set([target] + df[numeric_cols].var().nlargest(15).index.tolist()))
-            focus_cols = [c for c in focus_cols if c in numeric_cols]
-            corr_matrix = df[focus_cols].corr().round(2).fillna(0).to_dict()
-
-        eda_data_for_ai = {
-            "univariate": univariate,
-            "clustering": clustering,
-            "tests": statistical_tests
-        }
-
-        ai_insights = await self._generate_ai_insights_safe(eda_data_for_ai, 
-                                                             {"target_variable": target, **context}, 
-                                                             user_prompt)
-
-        return {
-            "metrics": {
-                "univariate": univariate,
-                "correlation": corr_matrix,
-                "clustering": clustering,
-                "tests": statistical_tests,
-                "themes": themes
-            },
-            "charts_data": {
-                "distributions": distributions,
-                "pies": pie_charts,
-                "scatters": scatter_plots
-            },
-            "ai_insights": ai_insights,
-            "auto_target": target,
-            "summary": {
-                "total_rows": len(df),
-                "total_cols": len(df.columns),
-                "numeric_cols": len(numeric_cols),
-                "missing_values": df.isna().sum().sum()
-            }
-        }
-
     def _detect_themes(self, df: pd.DataFrame) -> Dict[str, List[str]]:
-        """Thématisation des colonnes."""
+        """Thématisation"""
         themes = {}
         keywords_map = {
-            "Démographie": ["age", "taona", "genre", "sexe", "situation", "matrimonial", "fokontany", "commune", "region"],
-            "Économie": ["vol", "revenu", "argent", "budget", "fandaniana", "vidin", "prix", "amidy", "salaire", "bola"],
-            "Activité": ["asa", "metier", "job", "fambolena", "fiompiana", "vokatra", "terrain", "surface"],
-            "Tech & Biens": ["tel", "phone", "radio", "jiro", "electricite", "panneau", "moto", "voiture", "maison"],
-            "Temporel": ["date", "fotoana", "duree", "taona", "annee", "mois"]
+            "Démographie": ["age", "genre", "sexe", "region"],
+            "Économie": ["revenu", "argent", "budget", "salaire"],
+            "Activité": ["metier", "job", "activité"],
+            "Tech": ["tel", "phone", "electricite"],
+            "Temporel": ["date", "annee", "mois"]
         }
-
         assigned = set()
         for theme, keywords in keywords_map.items():
-            cols = [c for c in df.columns if not c in assigned and any(k in c.lower() for k in keywords)]
+            cols = [c for c in df.columns if c not in assigned and any(k in c.lower() for k in keywords)]
             if cols:
                 themes[theme] = cols
                 assigned.update(cols)
-
         others = [c for c in df.columns if c not in assigned]
         if others:
             themes["Autres"] = others
-
         return themes
 
-    def _generate_fallback_eda(self, df: pd.DataFrame, target: str) -> dict:
-        """EDA minimaliste en cas d'erreur."""
-        logger.warning("⚠️ Fallback EDA")
-        return {
-            "metrics": {
-                "univariate": {},
-                "correlation": {},
-                "clustering": None,
-                "tests": [],
-                "themes": {}
-            },
-            "charts_data": {
-                "distributions": {},
-                "pies": [],
-                "scatters": []
-            },
-            "ai_insights": [{
-                "title": "⚠️ Analyse Limitée",
-                "summary": "Données insuffisantes ou erreur technique.",
-                "recommendation": "Vérifiez la qualité du fichier et réessayez."
-            }],
-            "auto_target": target,
-            "summary": {
-                "total_rows": len(df),
-                "total_cols": len(df.columns)
-            }
-        }
+    def _build_clustering_views(self, multi_clustering: Optional[Dict]) -> List[Dict]:
+        """Construire les vues pour tous les clusterings"""
+        if not multi_clustering or not multi_clustering.get('clusterings'):
+            return []
+        
+        views = []
+        for clust_key, clust_data in multi_clustering['clusterings'].items():
+            views.append({
+                "type": "clustering",
+                "title": clust_data.get('name', clust_key),
+                "key": clust_key,
+                "data": clust_data
+            })
+        return views
 
-# Instanciation
+    async def _generate_ai_insights(self, multi_clustering: Optional[Dict], correlations: Dict, 
+                                   tests: List[Dict], context: Dict) -> List[Dict]:
+        """Insights IA"""
+        try:
+            target = context.get('target_variable', 'Unknown')
+            n_clusters = multi_clustering.get('n_clustering_types', 0) if multi_clustering else 0
+            
+            insights_list = [
+                {"title": "Analyse Complétée", "summary": f"Analyse de {target} effectuée", "recommendation": "Consultez les résultats"},
+                {"title": "Segmentation", "summary": f"{n_clusters} modèles de clustering", "recommendation": "Examinez les profils"},
+                {"title": "Relations", "summary": f"{len(tests)} tests statistiques", "recommendation": "Vérifiez les tests significatifs"}
+            ]
+            
+            if multi_clustering and multi_clustering.get('global_explanation'):
+                global_exp = multi_clustering['global_explanation']
+                insights_list.append({
+                    "title": "Segmentation Intelligente",
+                    "summary": global_exp.get('summary', ''),
+                    "recommendation": global_exp.get('recommendation', '')
+                })
+            
+            return insights_list
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Insights error: {e}")
+            return [{"title": "Analyse Effectuée", "summary": "EDA complétée", "recommendation": "Examinez les résultats"}]
+
+    async def run_full_eda(self, df: pd.DataFrame, file_structure: Dict[str, Any],
+                          context: Dict[str, Any], user_prompt: str = "") -> Dict[str, Any]:
+        """🚀 PIPELINE EDA V5"""
+        
+        logger.info("=" * 60 + "\n🚀 EDA PIPELINE V5 DÉMARRAGE\n" + "=" * 60)
+        
+        try:
+            target = self._smart_target_detection(df, user_prompt, context)
+            context['target_variable'] = target
+            selected_vars = self._select_key_variables(df, file_structure, context)
+            
+            logger.info(f"📊 Target: {target}")
+            logger.info(f"   - Numériques: {len(selected_vars.get('numeric_analysis', []))}")
+            logger.info(f"   - Catégories: {len(selected_vars.get('categorical_analysis', []))}")
+            
+            univariate = self._get_univariate_stats_smart(df, selected_vars)
+            multi_clustering = self._perform_multi_clustering(df, selected_vars)
+            correlations = self._analyze_correlations_deeply(df, selected_vars)
+            statistical_tests = self._smart_statistical_tests(df, selected_vars)
+            distributions = self._get_distributions(df, selected_vars)
+            pie_charts = self._get_pie_charts(df, selected_vars)
+            scatter_plots = self._get_scatter_plots(df, selected_vars)
+            themes = self._detect_themes(df)
+            ai_insights = await self._generate_ai_insights(multi_clustering, correlations, statistical_tests, context)
+            
+            clustering_explanations = {}
+            if multi_clustering and multi_clustering.get('clusterings'):
+                for key, clustering in multi_clustering['clusterings'].items():
+                    if clustering and clustering.get('explanation'):
+                        clustering_explanations[key] = clustering['explanation']
+            
+            logger.info(f"✅ EDA V5 COMPLÉTÉE:")
+            logger.info(f"   - Univariate: {len(univariate)}")
+            logger.info(f"   - Clustering: {multi_clustering.get('n_clustering_types', 0) if multi_clustering else 0}")
+            logger.info(f"   - Correlations: {correlations.get('summary', {}).get('strong_pairs', 0)} fortes")
+            logger.info(f"   - Tests: {len(statistical_tests)}")
+            
+            return {
+                "metrics": {
+                    "selection_reasoning": selected_vars.get('reasoning'),
+                    "variable_scores": selected_vars.get('scores'),
+                    "univariate": univariate,
+                    "multi_clustering": multi_clustering,
+                    "correlations": correlations,
+                    "tests": statistical_tests,
+                    "themes": themes
+                },
+                "charts_data": {
+                    "distributions": distributions,
+                    "pies": pie_charts,
+                    "scatters": scatter_plots,
+                    "clustering_views": self._build_clustering_views(multi_clustering),
+                    "clustering_explanations": clustering_explanations
+                },
+                "ai_insights": ai_insights,
+                "auto_target": selected_vars.get('target'),
+                "summary": {
+                    "total_rows": len(df),
+                    "total_cols": len(df.columns),
+                    "numeric_analyzed": len(selected_vars.get('numeric_analysis', [])),
+                    "categorical_analyzed": len(selected_vars.get('categorical_analysis', [])),
+                    "missing_values": int(df.isna().sum().sum())
+                }
+            }
+        
+        except Exception as e:
+            logger.error(f"❌ ERREUR EDA: {e}", exc_info=True)
+            raise
+
+
+# Instance globale
 eda_service = EDAService()

@@ -1,4 +1,3 @@
-# Fichier: backend/models/analysis.py
 from pydantic import BaseModel, Field
 from typing import List, Any, Dict, Optional
 
@@ -8,7 +7,7 @@ class FilePreviewResponse(BaseModel):
     filename: str
     total_rows: int
     total_columns: int
-    columns_list: List[str]
+    columns_list: List[str] 
     empty_columns: List[str]
     removed_empty_columns: List[str] = []
     preview_data: List[Dict[str, Any]]
@@ -22,6 +21,12 @@ class Insight(BaseModel):
     recommendation: str
     # Optionnel: référence à une colonne ou un graphique
 
+class TabExplanation(BaseModel):
+    """Explication pour un onglet spécifique de l'analyse EDA"""
+    title: str = Field(..., description="Titre de l'onglet/analyse")
+    summary: str = Field(..., description="Résumé des résultats")
+    recommendation: str = Field(..., description="Recommandations d'action")
+
 class Visualization(BaseModel):
     """Référence à un graphique généré (pour affichage React)"""
     id: str # ID unique du graphique
@@ -34,6 +39,7 @@ class FullAnalysisResult(BaseModel):
     file_id: str
     summary_stats: Dict[str, Any] = Field(..., description="Statistiques descriptives (moyenne, médiane, etc.) de base")
     insights: List[Insight]
+    tab_explanations: Dict[str, TabExplanation] = Field(..., description="Explications par onglet: overview, stats, charts, tests, clustering, correlation")
     visualizations: List[Visualization]
     model_predictions: Optional[Dict[str, Any]] = None # Si un modèle ML a été entraîné
     analysis_type: str = Field(..., description="Le type d'analyse détecté (ex: regression, classification, descriptif)")

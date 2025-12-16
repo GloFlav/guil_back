@@ -3,8 +3,10 @@
 import logging
 import json
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import asyncio
+import pandas as pd  # ← AJOUTER CET IMPORT
+import numpy as np   # ← AJOUTER CET IMPORT
 from config.settings import settings
 from models.survey import ContextExtraction
 
@@ -186,6 +188,124 @@ Réponds UNIQUEMENT avec un JSON valide, sans texte supplémentaire."""
                 "Commentaires supplémentaires"
             ]
         }
+
+    async def extract_context_with_file(self, user_prompt: str, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Extrait le contexte AVEC analyse du fichier de données.
+        """
+        try:
+            # 1. Extraire le contexte de base
+            base_context = await self.extract_context(user_prompt)
+            if not base_context["success"]:
+                return base_context
+            
+            context_data = base_context["data"]
+            
+            # 2. Analyser le fichier pour enrichir le contexte
+            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+            categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+            
+            # 3. Détecter le type d'analyse probable
+            analysis_type = self._infer_analysis_type(df, context_data)
+            
+            # 4. Détecter la variable cible probable
+            target_variable = self._infer_target_variable(df, context_data, user_prompt)
+            
+            # 5. Identifier les variables focus
+            focus_variables = self._identify_focus_variables(df, context_data, user_prompt)
+            
+            # 6. Enrichir le contexte
+            enriched_context = {
+                **context_data,
+                "analysis_type": analysis_type,
+                "target_variable": target_variable,
+                "focus_variables": focus_variables,
+                "file_stats": {
+                    "total_rows": len(df),
+                    "total_columns": len(df.columns),
+                    "numeric_columns": len(numeric_cols),
+                    "categorical_columns": len(categorical_cols)
+                }
+            }
+            
+            return {
+                "success": True,
+                "data": enriched_context
+            }
+            
+        except Exception as e:
+            logger.error(f"Erreur extraction contexte enrichi: {e}")
+            return {
+                "success": True,
+                "data": self._get_default_context(user_prompt)
+            }
+    
+    def _infer_analysis_type(self, df: pd.DataFrame, context: Dict[str, Any]) -> str:
+        """Infère le type d'analyse basé sur les données et le contexte."""
+        
+        objective = context.get("survey_objective", "").lower()
+        numeric_cols = df.select_dtypes(include=np.number).columns
+        
+        # Règles de détection
+        if any(word in objective for word in ["prédire", "prédiction", "forecast", "predict"]):
+            if len(numeric_cols) >= 5:
+                return "regression"
+            else:
+                return "classification"
+        
+        elif any(word in objective for word in ["grouper", "segmenter", "cluster", "group"]):
+            return "clustering"
+        
+        elif any(word in objective for word in ["associer", "lier", "relation", "corrélation"]):
+            return "correlation"
+        
+        # Par défaut: descriptive
+        return "descriptive"
+    
+    def _infer_target_variable(self, df: pd.DataFrame, context: Dict[str, Any], 
+                              user_prompt: str) -> str:
+        """Infère la variable cible."""
+        
+        objective = context.get("survey_objective", "").lower()
+        cols = df.columns.tolist()
+        
+        # 1. Chercher des mots-clés dans les noms de colonnes
+        target_keywords = ["target", "cible", "objectif", "resultat", "outcome", 
+                          "score", "note", "rating", "évaluation"]
+        
+        for col in cols:
+            col_lower = col.lower()
+            if any(keyword in col_lower for keyword in target_keywords):
+                return col
+        
+        # 2. Chercher dans l'objectif
+        for col in cols:
+            if col.lower() in objective:
+                return col
+        
+        # 3. Prendre la première colonne numérique
+        numeric_cols = df.select_dtypes(include=np.number).columns
+        if len(numeric_cols) > 0:
+            return numeric_cols[0]
+        
+        # 4. Fallback
+        return cols[0] if len(cols) > 0 else "unknown"
+    
+    def _identify_focus_variables(self, df: pd.DataFrame, context: Dict[str, Any],
+                                 user_prompt: str) -> List[str]:
+        """Identifie les variables importantes."""
+        
+        objective = context.get("survey_objective", "").lower()
+        cols = df.columns.tolist()
+        focus_vars = []
+        
+        # Chercher des variables mentionnées dans le prompt
+        for col in cols:
+            if col.lower() in user_prompt.lower():
+                focus_vars.append(col)
+        
+        # Limiter à 5 variables
+        return focus_vars[:5]
 
 # Instance globale du service
 context_extraction_service = ContextExtractionService()
