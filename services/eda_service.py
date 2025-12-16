@@ -626,7 +626,7 @@ class EDAService:
                 for idx in range(n_samples)  # TOUS les points
             ]
             
-            # 7. DNA des clusters
+            # 🔧 7. DNA des clusters - VERSION AMÉLIORÉE
             df_clust = df_numeric.copy()
             df_clust['cluster'] = clusters
             global_mean = df_numeric.mean()
@@ -647,30 +647,88 @@ class EDAService:
                 local_mean = subset.mean()
                 z_scores = (local_mean - global_mean) / global_std
                 
-                # DNA avec caractéristiques distinctives
-                top_features = z_scores.abs().nlargest(min(5, len(z_scores)))
-                features_desc = {}
-                for feat in top_features.index:
-                    direction = "↑ HAUT" if z_scores[feat] > 0 else "↓ BAS"
-                    magnitude = abs(z_scores[feat])
+                # 🔧 CORRECTION: GARANTIR QU'ON A TOUJOURS DES CARACTÉRISTIQUES
+                # Même si les z_scores sont faibles, on prend les 3 variables les plus distinctives
+                z_scores_abs = z_scores.abs()
+                
+                # Filtrer les NaN
+                valid_indices = z_scores_abs.notna()
+                if not valid_indices.any():
+                    # Fallback: utiliser les variables avec la plus grande variance
+                    variance_scores = subset.var()
+                    if len(variance_scores) > 0:
+                        top_features = variance_scores.nlargest(min(3, len(variance_scores)))
+                        features_desc = {}
+                        for feat in top_features.index:
+                            direction = "≈ MOYENNE"
+                            value = local_mean.get(feat, 0)
+                            features_desc[feat] = {
+                                "direction": direction,
+                                "z_score": 0.0,
+                                "value": round(float(value), 2),
+                                "importance": round(float(top_features[feat]), 2),
+                                "interpretation": f"Variance: {top_features[feat]:.2f}"
+                            }
+                    else:
+                        features_desc = {}
+                else:
+                    # Prendre au moins 3 caractéristiques, même si les z-scores sont faibles
+                    n_features = min(5, len(z_scores))
+                    top_features = z_scores_abs.nlargest(n_features)
                     
-                    features_desc[feat] = {
-                        "direction": direction,
-                        "z_score": round(float(z_scores[feat]), 2),
-                        "value": round(float(local_mean[feat]), 2),
-                        "importance": round(magnitude, 2),
-                        "interpretation": f"{direction} de {magnitude:.1f} écarts-types"
+                    features_desc = {}
+                    for feat in top_features.index:
+                        if pd.notna(z_scores[feat]):
+                            if abs(z_scores[feat]) > 0.1:
+                                direction = "↑ HAUT" if z_scores[feat] > 0 else "↓ BAS"
+                            else:
+                                direction = "≈ MOYENNE"
+                            magnitude = abs(z_scores[feat])
+                            features_desc[feat] = {
+                                "direction": direction,
+                                "z_score": round(float(z_scores[feat]), 2),
+                                "value": round(float(local_mean[feat]), 2),
+                                "importance": round(magnitude, 2),
+                                "interpretation": f"{direction} de {magnitude:.1f} écarts-types" if abs(z_scores[feat]) > 0.1 else "Proche de la moyenne"
+                            }
+                        else:
+                            # Fallback pour les NaN
+                            features_desc[feat] = {
+                                "direction": "≈ MOYENNE",
+                                "z_score": 0.0,
+                                "value": round(float(local_mean.get(feat, 0)), 2),
+                                "importance": 0.0,
+                                "interpretation": "Données insuffisantes"
+                            }
+                
+                # 🔧 CORRECTION: Si features_desc est vide, ajouter au moins une caractéristique
+                if not features_desc:
+                    # Prendre la première variable numérique
+                    first_var = df_numeric.columns[0] if len(df_numeric.columns) > 0 else "Variable"
+                    features_desc[first_var] = {
+                        "direction": "≈ MOYENNE",
+                        "z_score": 0.0,
+                        "value": round(float(local_mean.get(first_var, 0)), 2),
+                        "importance": 0.0,
+                        "interpretation": "Données limitées pour ce groupe"
                     }
                 
                 cluster_size = len(subset)
                 cluster_percentage = 100 * cluster_size / len(df_clust)
+                
+                # Calculer la distinctivité basée sur les z-scores valides
+                if len(features_desc) > 0:
+                    distinctiveness = np.mean([abs(feat_info.get('z_score', 0)) 
+                                            for feat_info in features_desc.values()])
+                else:
+                    distinctiveness = 0.0
                 
                 cluster_dna[f"Groupe {int(cid)+1}"] = {
                     "size": int(cluster_size),
                     "percentage": round(cluster_percentage, 1),
                     "features": features_desc,
                     "centroid_distance": round(float(np.linalg.norm(local_mean - global_mean)), 2),
-                    "distinctiveness": round(float(top_features.mean()) if len(top_features) > 0 else 0, 2)
+                    "distinctiveness": round(float(distinctiveness), 2)
                 }
                 
                 cluster_dist.append({
@@ -680,10 +738,24 @@ class EDAService:
                     "color_index": int(cid) % 8
                 })
                 
-                heatmap_vals = {col: round(float(z_scores[col]), 2) for col in df_numeric.columns[:10]}
+                # Heatmap data
+                heatmap_vals = {}
+                for col in df_numeric.columns[:10]:
+                    z_val = z_scores.get(col, 0)
+                    if pd.notna(z_val):
+                        heatmap_vals[col] = round(float(z_val), 2)
+                    else:
+                        heatmap_vals[col] = 0.0
                 heatmap_data.append({"cluster": f"Groupe {int(cid)+1}", "values": heatmap_vals})
                 
-                radar_vals = {col: round(float(z_scores[col]), 2) for col in df_numeric.columns[:8]}
+                # Radar data
+                radar_vals = {}
+                for col in df_numeric.columns[:8]:
+                    z_val = z_scores.get(col, 0)
+                    if pd.notna(z_val):
+                        radar_vals[col] = round(float(z_val), 2)
+                    else:
+                        radar_vals[col] = 0.0
                 radar_data.append({"cluster": f"Groupe {int(cid)+1}", "values": radar_vals})
             
             if not cluster_dna:
@@ -729,7 +801,7 @@ class EDAService:
         except Exception as e:
             logger.error(f"❌ Erreur génération clustering {name}: {e}", exc_info=True)
             return None
-
+        
     def _generate_clustering_explanation(self, cluster_dna: Dict, validation: Dict, 
                                         silhouette_score_val: Optional[float], name: str, 
                                         data_dispersion_level: float = 0.0,
@@ -959,13 +1031,15 @@ class EDAService:
                 "clusterings": clusterings,
                 "n_clustering_types": len(clusterings),
                 "global_explanation": global_explanation,
-                "variables_used": best_clustering_vars[:10],
+                "variables_used": best_clustering_vars[:10],  # 🔧 IMPORTANT: Retourner les variables utilisées
                 "total_points": len(df_imputed)
             }
         
         except Exception as e:
             logger.error(f"❌ Erreur multi-clustering: {e}", exc_info=True)
             return None
+            
+        
 
     def _create_fallback_clustering(self, df_numeric: pd.DataFrame, scaled_data: np.ndarray) -> Optional[Dict]:
         """
@@ -1464,6 +1538,9 @@ class EDAService:
         except Exception as e:
             logger.error(f"❌ ERREUR EDA: {e}", exc_info=True)
             raise
+
+
+    
 
 
 # Instance globale
