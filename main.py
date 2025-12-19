@@ -1,6 +1,6 @@
 from fastapi import FastAPI, WebSocket, HTTPException, BackgroundTasks, WebSocketDisconnect, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 import logging
 import traceback
@@ -12,6 +12,107 @@ import json
 from pydantic import BaseModel, Field
 import pandas as pd
 import numpy as np
+import math
+
+
+# ==================== CUSTOM JSON ENCODER POUR NaN/Inf ====================
+
+class NaNSafeJSONEncoder(json.JSONEncoder):
+    """
+    🔧 Encodeur JSON qui gère les NaN, Inf, -Inf et types numpy
+    """
+    def default(self, obj):
+        # Types numpy
+        if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+            return int(obj)
+        if isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+            if np.isnan(obj) or np.isinf(obj):
+                return None
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return self._clean_array(obj.tolist())
+        
+        # Pandas types
+        if isinstance(obj, pd.DataFrame):
+            return obj.replace({np.nan: None, np.inf: None, -np.inf: None}).to_dict('records')
+        if isinstance(obj, pd.Series):
+            return obj.replace({np.nan: None, np.inf: None, -np.inf: None}).to_dict()
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        if pd.isna(obj):
+            return None
+            
+        # Datetime
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        
+        # Bytes
+        if isinstance(obj, bytes):
+            return obj.decode('utf-8', errors='ignore')
+        
+        return super().default(obj)
+    
+    def _clean_array(self, arr):
+        """Nettoie récursivement une liste"""
+        result = []
+        for item in arr:
+            if isinstance(item, (list, tuple)):
+                result.append(self._clean_array(item))
+            elif isinstance(item, float) and (math.isnan(item) or math.isinf(item)):
+                result.append(None)
+            elif isinstance(item, (np.floating, np.float64, np.float32)):
+                if np.isnan(item) or np.isinf(item):
+                    result.append(None)
+                else:
+                    result.append(float(item))
+            elif isinstance(item, (np.integer, np.int64, np.int32)):
+                result.append(int(item))
+            else:
+                result.append(item)
+        return result
+    
+    def encode(self, obj):
+        """Override encode pour nettoyer avant encodage"""
+        return super().encode(self._deep_clean(obj))
+    
+    def _deep_clean(self, obj):
+        """Nettoyage profond récursif"""
+        if obj is None:
+            return None
+        if isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        if isinstance(obj, (np.floating, np.float64, np.float32)):
+            if np.isnan(obj) or np.isinf(obj):
+                return None
+            return float(obj)
+        if isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, dict):
+            return {k: self._deep_clean(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [self._deep_clean(item) for item in obj]
+        if isinstance(obj, np.ndarray):
+            return self._deep_clean(obj.tolist())
+        return obj
+
+
+class SafeJSONResponse(JSONResponse):
+    """
+    🛡️ JSONResponse qui utilise l'encodeur NaN-safe
+    """
+    def render(self, content: Any) -> bytes:
+        return json.dumps(
+            content,
+            cls=NaNSafeJSONEncoder,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
 
 
 from config.settings import settings
@@ -34,6 +135,15 @@ from services.multi_llm_insights import multi_llm_insights
 from services.file_structure_analysis_service import file_structure_analysis_service
 from services.analysis_pipeline_service import analysis_pipeline
 from services.tab_explanations_generator import generate_tab_explanations_async
+from services.smart_export_service import smart_export_service
+# ==================== 🚀 NOUVEAUX IMPORTS - SMART ANALYTICS ====================
+from services.feature_forge_service import feature_forge_service
+from services.ml_pipeline_service import ml_pipeline_service
+from services.insight_storyteller_service import insight_storyteller_service
+from services.smart_analytics_orchestrator import (
+    smart_analytics_orchestrator, 
+    analyze_file_complete
+)
 
 # ==================== MODÈLES PYDANTIC (DÉFINIR EN HAUT!) ====================
 
@@ -48,6 +158,95 @@ class CleanRequest(BaseModel):
     file_id: str
     format: str = "xlsx"
     remove_sparse: bool = False
+
+
+class SmartAnalysisRequest(BaseModel):
+    """Requête pour l'analyse intelligente complète"""
+    file_id: str
+    user_prompt: str = ""
+    options: Optional[Dict[str, Any]] = None
+
+
+class FeatureEngineeringRequest(BaseModel):
+    """Requête pour le Feature Engineering seul"""
+    file_id: str
+    options: Optional[Dict[str, Any]] = None
+
+
+class MLPipelineRequest(BaseModel):
+    """Requête pour le ML Pipeline seul"""
+    file_id: str
+    target_variable: Optional[str] = None
+    tune_hyperparams: bool = False
+    options: Optional[Dict[str, Any]] = None
+
+
+class StorytellerRequest(BaseModel):
+    """Requête pour générer le rapport/storytelling"""
+    file_id: str
+    include_llm_enrichment: bool = True
+
+
+# ==================== UTILITAIRES JSON ====================
+
+def clean_nan_values(obj: Any) -> Any:
+    """
+    🧹 Nettoie récursivement les valeurs NaN/Inf pour la sérialisation JSON.
+    
+    Remplace:
+    - NaN -> None
+    - Inf -> None
+    - -Inf -> None
+    - numpy types -> Python types
+    """
+    if obj is None:
+        return None
+    
+    # Gestion des types numpy
+    if isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    if isinstance(obj, (np.floating, np.float64, np.float32)):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return float(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.ndarray):
+        return clean_nan_values(obj.tolist())
+    
+    # Gestion des floats Python
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    
+    # Gestion des dictionnaires
+    if isinstance(obj, dict):
+        return {k: clean_nan_values(v) for k, v in obj.items()}
+    
+    # Gestion des listes/tuples
+    if isinstance(obj, (list, tuple)):
+        return [clean_nan_values(item) for item in obj]
+    
+    # Gestion des DataFrames pandas (les convertir en dict)
+    if isinstance(obj, pd.DataFrame):
+        return clean_nan_values(obj.replace({np.nan: None}).to_dict('records'))
+    
+    # Gestion des Series pandas
+    if isinstance(obj, pd.Series):
+        return clean_nan_values(obj.replace({np.nan: None}).to_dict())
+    
+    # Gestion des Timestamp pandas
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    
+    # Gestion des datetime
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    
+    # Retourner tel quel pour les autres types (str, int, bool, etc.)
+    return obj
+
 
 # ==================== Configuration du Logging ====================
 
@@ -76,7 +275,11 @@ except Exception as e:
 
 # ==================== App Setup ====================
 
-app = FastAPI(title="Survey Generator API v3", version="3.0.0")
+app = FastAPI(
+    title="Smart Analytics API", 
+    version="4.0.0",
+    description="API d'analyse de données automatisée avec Multi-LLM"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -93,7 +296,17 @@ if os.path.exists(settings.excel_output_dir):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "version": "3.0.0"}
+    return {
+        "status": "healthy", 
+        "version": "4.0.0",
+        "services": {
+            "eda": "active",
+            "feature_forge": "active",
+            "ml_pipeline": "active",
+            "storyteller": "active",
+            "smart_orchestrator": "active"
+        }
+    }
 
 @app.get("/api/v1/locations")
 async def get_locations():
@@ -116,29 +329,18 @@ async def upload_file_preview(file: UploadFile):
     """
     logger.info(f"📤 Upload preview demandé pour: {file.filename}")
     try:
-        # On délègue au service dédié qui utilise FileParser
         return await upload_service.process_upload_preview(file)
     except Exception as e:
         logger.error(f"Erreur upload preview: {e}")
-        # On renvoie une 400 pour que le front sache que le fichier est illisible
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/v1/analyze/file-structure-tts")
 async def file_structure_tts(request: AnalyzeRequest):
     """
     ✨ ENDPOINT TTS AVEC EXPLICATION THÉMATIQUE
-    
-    Analyse la structure du fichier et génère une explication complète:
-    1. Filtrage appliqué
-    2. Analyse globale
-    3. Variables clés
-    4. Analyse technique détaillée
-    
-    Retourne le texte prêt pour TTS avec explication naturelle.
     """
     logger.info(f"🎤 TTS Structure demandé pour: {request.file_id}")
     
-    # Construire le chemin du fichier
     file_path = os.path.join(settings.excel_output_dir, request.file_id)
     
     if not os.path.exists(file_path):
@@ -146,7 +348,6 @@ async def file_structure_tts(request: AnalyzeRequest):
         raise HTTPException(404, f"Fichier '{request.file_id}' introuvable.")
     
     try:
-        # Lire le fichier
         try:
             if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
                 df = pd.read_excel(file_path)
@@ -160,7 +361,6 @@ async def file_structure_tts(request: AnalyzeRequest):
             logger.error(f"Erreur lecture fichier: {e}")
             raise HTTPException(400, f"Impossible de lire le fichier: {str(e)}")
         
-        # Préparer les stats
         file_stats = {
             "file_id": request.file_id,
             "filename": os.path.basename(file_path),
@@ -173,11 +373,10 @@ async def file_structure_tts(request: AnalyzeRequest):
         
         logger.info(f"📊 Fichier chargé: {file_stats['total_rows']} lignes, {file_stats['total_columns']} colonnes")
         
-        # ✅ APPEL CORRECT AU SERVICE:
         result = await file_structure_analysis_service.analyze_file_structure(
-            file_path=file_path,      # ✅ Correct!
-            df=df,                    # ✅ Correct!
-            file_stats=file_stats     # ✅ Correct!
+            file_path=file_path,
+            df=df,
+            file_stats=file_stats
         )
         
         if not result.get("success", False):
@@ -204,10 +403,8 @@ async def file_structure_tts(request: AnalyzeRequest):
 
 @app.post("/api/v1/export/clean-download")
 async def clean_and_download(request: CleanRequest):
-    """
-    Reprend le fichier uploadé via son ID, supprime les colonnes vides et renvoie le fichier.
-    """
-    logger.info(f"🧹 Demande de nettoyage pour le fichier {request.file_id} (Sparse: {request.remove_sparse})")
+    """Reprend le fichier uploadé via son ID, supprime les colonnes vides et renvoie le fichier."""
+    logger.info(f"🧹 Demande de nettoyage pour le fichier {request.file_id}")
     
     file_path = os.path.join(settings.excel_output_dir, request.file_id)
     
@@ -215,7 +412,6 @@ async def clean_and_download(request: CleanRequest):
         raise HTTPException(404, "Fichier original introuvable ou expiré.")
     
     try:
-        # Appel au service de nettoyage
         result = cleaning_service.auto_clean_file(
             file_path, 
             request.format, 
@@ -273,7 +469,8 @@ async def create_google_form(survey_data: Dict[str, Any]):
         logger.error(f"Erreur Google API: {e}")
         raise HTTPException(500, str(e))
 
-# ==================== Routes Analyse Complète ====================
+# ==================== Routes Analyse Complète (Legacy) ====================
+
 @app.post("/api/v1/analyze/full", response_model=FullAnalysisResult)
 async def full_analysis(request: AnalyzeRequest):
     """Analyse complète du fichier avec EDA + 6 explications par onglet."""
@@ -308,21 +505,18 @@ async def full_analysis(request: AnalyzeRequest):
         # 3. EDA avec contexte complet
         eda_results = await eda_service.run_full_eda(
             df=df_processed,
-            file_structure={},  # file_structure vide car on a déjà le fichier
+            file_structure={},
             context=context,
             user_prompt=request.user_prompt
         )
         
-        # ===== 🎯 EXPLICATIONS PAR ONGLET - CORRECTION CRITIQUE =====
+        # 4. Explications par onglet
         logger.info("📝 Génération des 6 explications par onglet...")
         
-        from services.tab_explanations_generator import TabExplanationsGenerator, generate_tab_explanations_async
+        from services.tab_explanations_generator import TabExplanationsGenerator
         
-        # Créer le dictionnaire de données EDA pour les explications
         eda_data = TabExplanationsGenerator.create_summary_eda_data(eda_results)
         
-        # ✅ APPEL CORRECT: Pas de multi_llm_service!
-        # La fonction appelle directement Anthropic en interne
         tab_explanations_raw = await generate_tab_explanations_async(
             eda_data=eda_data,
             context=context
@@ -330,7 +524,6 @@ async def full_analysis(request: AnalyzeRequest):
         
         logger.info(f"✅ {len(tab_explanations_raw)} explications générées")
         
-        # ===== Convertir les explications brutes en objets TabExplanation =====
         tab_explanations = {}
         for tab_key, explanation_data in tab_explanations_raw.items():
             if explanation_data and isinstance(explanation_data, dict):
@@ -342,14 +535,13 @@ async def full_analysis(request: AnalyzeRequest):
                     )
                 except Exception as e:
                     logger.warning(f"Erreur création TabExplanation pour {tab_key}: {e}")
-                    # Créer un TabExplanation par défaut
                     tab_explanations[tab_key] = TabExplanation(
                         title=f"Onglet {tab_key}",
                         summary="Explication non disponible",
                         recommendation="Consultez les données pour plus d'informations"
                     )
         
-        # 4. Préparer les insights
+        # 5. Insights
         insights = []
         ai_insights = eda_results.get("ai_insights", [])
         if ai_insights and isinstance(ai_insights, list):
@@ -361,7 +553,7 @@ async def full_analysis(request: AnalyzeRequest):
                         recommendation=insight_data.get("recommendation", "")
                     ))
         
-        # 5. Réponse enrichie
+        # 6. Réponse
         full_response = FullAnalysisResult(
             file_id=request.file_id,
             analysis_type=context.get("analysis_type", "descriptive"),
@@ -387,7 +579,353 @@ async def full_analysis(request: AnalyzeRequest):
     except Exception as e:
         logger.error(f"❌ Erreur analyse complète: {e}", exc_info=True)
         raise HTTPException(500, str(e))
-# ==================== WebSocket ====================
+
+
+# ==================== 🚀 NOUVEAUX ENDPOINTS - SMART ANALYTICS ====================
+
+@app.post("/api/v1/smart-analyze/complete")
+async def smart_analysis_complete(request: SmartAnalysisRequest):
+    """
+    🚀 ANALYSE INTELLIGENTE COMPLÈTE - 8 PHASES
+    
+    Pipeline complet:
+    1. Chargement données
+    2. Analyse structure
+    3. Inférence contexte
+    4. EDA exploratoire
+    5. Feature Engineering
+    6. Modélisation ML
+    7-8. Storytelling & Rapports
+    
+    Retourne l'analyse complète avec insights, modèles ML et recommandations.
+    """
+    logger.info(f"🚀 Smart Analysis demandée pour: {request.file_id}")
+    
+    file_path = os.path.join(settings.excel_output_dir, request.file_id)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(404, f"Fichier '{request.file_id}' introuvable.")
+    
+    try:
+        result = await analyze_file_complete(
+            file_id=request.file_id,
+            file_path=file_path,
+            user_prompt=request.user_prompt
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(500, result.get("error", "Erreur inconnue"))
+        
+        # 🧹 Nettoyer les NaN et utiliser SafeJSONResponse
+        cleaned_result = clean_nan_values(result)
+        return SafeJSONResponse(content=cleaned_result)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erreur Smart Analysis: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/v1/smart-analyze/feature-engineering")
+async def feature_engineering_endpoint(request: FeatureEngineeringRequest):
+    """
+    🔧 FEATURE ENGINEERING SEUL
+    
+    Transforme les données brutes en features intelligentes:
+    - Features temporelles
+    - Features d'interaction
+    - Encodage catégoriel
+    - Scaling
+    - PCA
+    - Feature Selection
+    """
+    logger.info(f"🔧 Feature Engineering demandé pour: {request.file_id}")
+    
+    file_path = os.path.join(settings.excel_output_dir, request.file_id)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(404, f"Fichier '{request.file_id}' introuvable.")
+    
+    try:
+        # Charger les données
+        if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
+            df = pd.read_excel(file_path)
+        else:
+            df = pd.read_csv(file_path)
+        
+        # Inférer le contexte
+        sample = df.head(5).replace({np.nan: None}).to_dict('records')
+        context = await context_analyst.infer_analysis_goal(
+            "", df.columns.tolist(), sample
+        )
+        
+        # Feature Engineering
+        result = await feature_forge_service.forge_features(
+            df=df,
+            context=context,
+            options=request.options or {}
+        )
+        
+        # Exclure le DataFrame pour la sérialisation
+        response = {
+            k: v for k, v in result.items() 
+            if k != "df_transformed"
+        }
+        response["file_id"] = request.file_id
+        
+        # 🧹 Nettoyer et utiliser SafeJSONResponse
+        return SafeJSONResponse(content=clean_nan_values(response))
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erreur Feature Engineering: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/v1/smart-analyze/ml-pipeline")
+async def ml_pipeline_endpoint(request: MLPipelineRequest):
+    """
+    🤖 ML PIPELINE SEUL
+    
+    Modélisation Machine Learning automatisée:
+    - Détection du type de problème
+    - Entraînement multi-algorithmes
+    - Cross-validation
+    - Feature importance
+    - Analyse des erreurs
+    """
+    logger.info(f"🤖 ML Pipeline demandé pour: {request.file_id}")
+    
+    file_path = os.path.join(settings.excel_output_dir, request.file_id)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(404, f"Fichier '{request.file_id}' introuvable.")
+    
+    try:
+        # Charger les données
+        if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
+            df = pd.read_excel(file_path)
+        else:
+            df = pd.read_csv(file_path)
+        
+        # Construire le contexte
+        context = {
+            "target_variable": request.target_variable,
+            "analysis_type": "auto"
+        }
+        
+        # Si pas de target, essayer de l'inférer
+        if not request.target_variable:
+            sample = df.head(5).replace({np.nan: None}).to_dict('records')
+            inferred = await context_analyst.infer_analysis_goal(
+                "", df.columns.tolist(), sample
+            )
+            context = inferred
+        
+        # ML Pipeline
+        options = request.options or {}
+        options["tune_hyperparams"] = request.tune_hyperparams
+        
+        result = await ml_pipeline_service.run_ml_pipeline(
+            df=df,
+            context=context,
+            options=options
+        )
+        
+        result["file_id"] = request.file_id
+        
+        # 🧹 Nettoyer et utiliser SafeJSONResponse
+        return SafeJSONResponse(content=clean_nan_values(result))
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erreur ML Pipeline: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/v1/smart-analyze/generate-report")
+async def generate_report_endpoint(request: StorytellerRequest):
+    """
+    📖 GÉNÉRATION DE RAPPORT & STORYTELLING
+    
+    Génère le rapport complet avec:
+    - Interprétation des résultats
+    - Insights "So what?"
+    - Data storytelling narratif
+    - Recommandations actionnables
+    - Export multi-format (MD, HTML)
+    """
+    logger.info(f"📖 Génération rapport demandée pour: {request.file_id}")
+    
+    # Vérifier si on a des résultats en cache
+    cached_results = await smart_analytics_orchestrator.get_analysis_results(request.file_id)
+    
+    if not cached_results:
+        raise HTTPException(
+            404, 
+            f"Aucune analyse trouvée pour '{request.file_id}'. "
+            "Lancez d'abord /api/v1/smart-analyze/complete"
+        )
+    
+    try:
+        # Générer le rapport depuis les résultats cachés
+        result = await insight_storyteller_service.tell_the_story(
+            eda_results=cached_results.get("data", {}).get("eda", {}),
+            ml_results=cached_results.get("data", {}).get("ml_pipeline", {}),
+            feature_engineering=cached_results.get("data", {}).get("feature_engineering", {}),
+            context=cached_results.get("data", {}).get("context", {}),
+            options={"use_llm_enrichment": request.include_llm_enrichment}
+        )
+        
+        result["file_id"] = request.file_id
+        
+        # 🧹 Nettoyer et utiliser SafeJSONResponse
+        return SafeJSONResponse(content=clean_nan_values(result))
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erreur génération rapport: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/v1/smart-analyze/status/{file_id}")
+async def get_smart_analysis_status(file_id: str):
+    """
+    📊 Statut d'une analyse Smart Analytics
+    """
+    status = await smart_analytics_orchestrator.get_analysis_status(file_id)
+    return SafeJSONResponse(content=clean_nan_values(status))
+
+
+@app.get("/api/v1/smart-analyze/results/{file_id}")
+async def get_smart_analysis_results(file_id: str):
+    """
+    📊 Récupère les résultats complets d'une Smart Analysis
+    """
+    results = await smart_analytics_orchestrator.get_analysis_results(file_id)
+    
+    if not results:
+        raise HTTPException(404, f"Aucun résultat trouvé pour '{file_id}'")
+    
+    # 🧹 Nettoyer les NaN/Inf ET utiliser SafeJSONResponse
+    cleaned_results = clean_nan_values(results)
+    
+    return SafeJSONResponse(content=cleaned_results)
+
+
+@app.delete("/api/v1/smart-analyze/clear/{file_id}")
+async def clear_smart_analysis(file_id: str):
+    """
+    🗑️ Supprime les résultats en cache pour un fichier
+    """
+    smart_analytics_orchestrator.clear_cache(file_id)
+    return {"success": True, "message": f"Cache vidé pour {file_id}"}
+
+
+# ==================== WebSocket Smart Analytics ====================
+
+# ... (le reste du fichier reste identique) ...
+
+# ==================== WebSocket Smart Analytics ====================
+
+@app.websocket("/ws/smart-analyze/{file_id}")
+async def websocket_smart_analyze(websocket: WebSocket, file_id: str):
+    """
+    🔄 WebSocket pour suivre en temps réel l'analyse Smart Analytics
+    
+    ✅ CORRIGÉ: Gestion des déconnexions sans crash
+    """
+    await websocket.accept()
+    
+    file_path = os.path.join(settings.excel_output_dir, file_id)
+    
+    if not os.path.exists(file_path):
+        await websocket.send_json({
+            "type": "error",
+            "message": f"Fichier '{file_id}' introuvable"
+        })
+        await websocket.close()
+        return
+    
+    try:
+        # Callback de progression
+        async def progress_callback(message: str, percentage: int):
+            try:
+                await websocket.send_json({
+                    "type": "progress",
+                    "message": message,
+                    "percentage": percentage,
+                    "timestamp": datetime.now().isoformat()
+                })
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur envoi progression: {e}")
+        
+        # Attendre un message de démarrage optionnel avec le prompt
+        try:
+            init_data = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+            user_prompt = init_data.get("user_prompt", "")
+        except asyncio.TimeoutError:
+            user_prompt = ""
+        
+        logger.info(f"🔄 WebSocket Smart Analysis: {file_id}")
+        
+        # Lancer l'analyse complète
+        results = await smart_analytics_orchestrator.run_complete_analysis(
+            file_id=file_id,
+            file_path=file_path,
+            user_prompt=user_prompt,
+            progress_callback=progress_callback
+        )
+        
+        # 🧹 Nettoyer les NaN avant d'envoyer via WebSocket
+        cleaned_summary = json.loads(
+            json.dumps(results.get("summary", {}), cls=NaNSafeJSONEncoder)
+        )
+        
+        # Envoyer les résultats finaux
+        await websocket.send_json({
+            "type": "completed",
+            "success": results.get("success", False),
+            "summary": cleaned_summary,
+            "phases_completed": results.get("phases_completed", []),
+            "phases_skipped": results.get("phases_skipped", []),
+            "execution_time": results.get("execution_time"),
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket déconnecté: {file_id}")
+        if connection_manager is not None:
+            try:
+                await connection_manager.disconnect(websocket)
+            except Exception as e:
+                logger.warning(f"Erreur lors de la déconnexion WebSocket: {e}")
+        else:
+            logger.warning("connection_manager est None")
+    
+    except Exception as e:
+        logger.error(f"Erreur WebSocket Smart Analysis: {e}", exc_info=True)
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": str(e),
+                "timestamp": datetime.now().isoformat()
+            })
+        except:
+            pass
+    
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
+
+
+# ==================== Routes Existantes (Legacy) ====================
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -399,11 +937,25 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_json()
             if data.get("type") == "generate":
                 await handle_generate_message(data, progress_streamer)
+    
     except WebSocketDisconnect:
-        await connection_manager.disconnect(websocket)
+        logger.info("WebSocket déconnecté")
+        if connection_manager is not None:
+            try:
+                await connection_manager.disconnect(websocket)
+            except Exception as e:
+                logger.warning(f"Erreur déconnexion WebSocket: {e}")
+        else:
+            logger.warning("connection_manager est None")
+    
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        await connection_manager.disconnect(websocket)
+        logger.error(f"WebSocket error: {e}", exc_info=True)
+        if connection_manager is not None:
+            try:
+                await connection_manager.disconnect(websocket)
+            except Exception as e:
+                logger.warning(f"Erreur déconnexion WebSocket: {e}")
+
 
 async def handle_generate_message(data: Dict[str, Any], progress_streamer: ProgressStreamer):
     """Gère la génération avec logs temps réel"""
@@ -449,7 +1001,6 @@ async def handle_generate_message(data: Dict[str, Any], progress_streamer: Progr
             context.get("number_of_locations", 5)
         )
         
-        # --- ENVOI LIEUX ---
         await progress_streamer.websocket.send_json({
             "type": "update_locations",
             "data": locations_result
@@ -459,7 +1010,6 @@ async def handle_generate_message(data: Dict[str, Any], progress_streamer: Progr
         # 3. Génération IA Parallèle
         logger.info("Progression IA: 🚀 Lancement génération parallèle")
         
-        # --- CALLBACK DE STREAMING ---
         async def partial_callback(message, status, payload=None):
             if status == "partial_data" and payload:
                 logger.info(f"📤 STREAMING: Envoi de {len(payload)} catégories au front")
@@ -483,7 +1033,7 @@ async def handle_generate_message(data: Dict[str, Any], progress_streamer: Progr
             "metadata": initial_structure["metadata"],
             "categories": categories,
             "locations": locations_result,
-            "version": "3.0.0",
+            "version": "4.0.0",
             "generated_at": datetime.now().isoformat(),
             "language": language
         }
@@ -500,9 +1050,7 @@ async def handle_generate_message(data: Dict[str, Any], progress_streamer: Progr
 
 @app.get("/api/v1/files/{file_id}/preview")
 async def get_file_preview(file_id: str):
-    """
-    Renvoie les 50 premières lignes du fichier (Raw ou Clean) pour prévisualisation.
-    """
+    """Renvoie les 50 premières lignes du fichier pour prévisualisation."""
     logger.info(f"👀 Prévisualisation demandée pour : {file_id}")
     
     file_path = os.path.join(settings.excel_output_dir, file_id)
@@ -511,29 +1059,23 @@ async def get_file_preview(file_id: str):
         raise HTTPException(status_code=404, detail="Fichier introuvable sur le serveur.")
 
     try:
-        # 1. Lecture du fichier (CSV ou Excel)
         if file_id.lower().endswith('.csv'):
             try:
-                df = pd.read_csv(file_path, engine='python') # Engine python plus robuste
+                df = pd.read_csv(file_path, engine='python')
             except:
                 df = pd.read_csv(file_path, sep=';', encoding='latin1', engine='python')
         else:
             df = pd.read_excel(file_path)
 
-        # 2. Limitation aux 50 premières lignes
         df_preview = df.head(500)
-
-        # 3. Nettoyage pour le JSON (Très important !)
-        # JSON ne supporte pas 'NaN' (Not a Number) de Pandas, il faut mettre 'null' (None en Python)
         df_preview = df_preview.replace({np.nan: None})
         
-        # Gestion des dates pour éviter les erreurs de sérialisation
         for col in df_preview.select_dtypes(include=['datetime64', 'datetimetz']).columns:
             df_preview[col] = df_preview[col].dt.strftime('%Y-%m-%d %H:%M:%S')
 
         return {
             "file_id": file_id,
-            "total_rows": len(df), # On renvoie la taille totale pour info
+            "total_rows": len(df),
             "preview": df_preview.to_dict(orient='records')
         }
 
@@ -542,24 +1084,11 @@ async def get_file_preview(file_id: str):
         raise HTTPException(status_code=500, detail=f"Erreur de lecture du fichier : {str(e)}")
 
 
-
-
-# ==================== Endpoints Analyse Complète ====================
+# ==================== Endpoints Legacy Pipeline ====================
 
 @app.post("/api/v1/analyze/start-full-pipeline")
 async def start_full_pipeline(request: AnalyzeRequest):
-    """
-    Lance le pipeline complet d'analyse sur un fichier
-    
-    Phases:
-    1. File Structure Analysis (5%)
-    2. Context Inference (20%)
-    3. Feature Engineering (35%)
-    4. EDA (55%)
-    5. Full Analysis Synthesis (100%)
-    
-    Retourne immédiatement avec un job_id pour tracking
-    """
+    """Lance le pipeline complet d'analyse (version legacy)"""
     logger.info(f"🚀 Demande pipeline complet: {request.file_id}")
     
     file_path = os.path.join(settings.excel_output_dir, request.file_id)
@@ -568,7 +1097,6 @@ async def start_full_pipeline(request: AnalyzeRequest):
         raise HTTPException(404, f"Fichier '{request.file_id}' introuvable.")
     
     try:
-        # Lancer le pipeline en background
         task = asyncio.create_task(
             analysis_pipeline.run_complete_analysis_pipeline(
                 file_id=request.file_id,
@@ -592,21 +1120,10 @@ async def start_full_pipeline(request: AnalyzeRequest):
 
 @app.get("/api/v1/analyze/status/{file_id}")
 async def get_analysis_status(file_id: str):
-    """
-    Retourne l'état actuel de l'analyse d'un fichier
-    
-    Responses:
-    {
-      "file_id": "clean_uuid...",
-      "file_structure": "completed|pending",
-      "eda": "completed|pending",
-      "full_analysis": "completed|pending",
-      "progress": 0-100
-    }
-    """
+    """Retourne l'état actuel de l'analyse d'un fichier"""
     try:
         status = await analysis_pipeline.get_analysis_status(file_id)
-        return status
+        return clean_nan_values(status)
     except Exception as e:
         logger.error(f"Erreur get_analysis_status: {e}")
         raise HTTPException(500, str(e))
@@ -614,51 +1131,14 @@ async def get_analysis_status(file_id: str):
 
 @app.get("/api/v1/analyze/results/{file_id}")
 async def get_analysis_results(file_id: str):
-    """
-    Récupère les résultats complets d'une analyse
-    
-    Retourne:
-    {
-      "file_id": "...",
-      "filename": "...",
-      "analysis_type": "regression|classification|descriptive|clustering",
-      "target_variable": "...",
-      "summary": {
-        "total_rows_original": 1000,
-        "total_cols_original": 50,
-        "total_rows_final": 950,
-        "total_cols_final": 35,
-        "numeric_cols": 20,
-        "categorical_cols": 15,
-        "missing_values": 150
-      },
-      "structure": {...},       # File structure analysis
-      "context": {...},         # Context inferred
-      "eda": {
-        "univariate": {...},    # Stats par colonne
-        "correlation": {...},   # Matrice corrélation
-        "clustering": {...},    # Résultats clustering 3D
-        "statistical_tests": [...],  # T-tests, Chi-2, ANOVA, etc.
-        "themes": {...},        # Thématisation colonnes
-        "distributions": {...},  # Histogrammes, boxplots
-        "pie_charts": [...],    # Camemberts
-        "scatter_plots": [...]  # Nuages de points
-      },
-      "insights": [...],        # Insights IA
-      "tts_text": "...",       # Texte pour lecture vocale
-      "timestamp": "..."
-    }
-    """
+    """Récupère les résultats complets d'une analyse"""
     try:
         results = await analysis_pipeline.get_analysis_results(file_id)
         
         if not results:
             raise HTTPException(404, f"Analyse non complétée ou fichier inexistant: {file_id}")
         
-        return {
-            "success": True,
-            "data": results
-        }
+        return {"success": True, "data": clean_nan_values(results)}
     
     except HTTPException:
         raise
@@ -672,24 +1152,15 @@ async def clear_analysis(file_id: str):
     """Supprime l'analyse en cache pour un fichier"""
     try:
         success = analysis_pipeline.clear_analysis(file_id)
-        return {
-            "success": success,
-            "message": f"Analyse supprimée pour {file_id}"
-        }
+        return {"success": success, "message": f"Analyse supprimée pour {file_id}"}
     except Exception as e:
         logger.error(f"Erreur clear_analysis: {e}")
         raise HTTPException(500, str(e))
 
 
-# ==================== WebSocket pour Streaming Analyse ====================
-
 @app.websocket("/ws/analyze/{file_id}")
 async def websocket_analyze(websocket: WebSocket, file_id: str):
-    """
-    WebSocket pour suivre en temps réel l'analyse d'un fichier
-    
-    Envoie des messages de progression au fil de l'analyse
-    """
+    """WebSocket pour suivre en temps réel l'analyse d'un fichier (legacy)"""
     await websocket.accept()
     
     file_path = os.path.join(settings.excel_output_dir, file_id)
@@ -703,7 +1174,6 @@ async def websocket_analyze(websocket: WebSocket, file_id: str):
         return
     
     try:
-        # Callback de progression
         async def progress_callback(message: str, percentage: int):
             await websocket.send_json({
                 "type": "progress",
@@ -712,7 +1182,6 @@ async def websocket_analyze(websocket: WebSocket, file_id: str):
                 "timestamp": pd.Timestamp.now().isoformat()
             })
         
-        # Lancer le pipeline
         logger.info(f"WebSocket analyse: {file_id}")
         
         results = await analysis_pipeline.run_complete_analysis_pipeline(
@@ -722,10 +1191,9 @@ async def websocket_analyze(websocket: WebSocket, file_id: str):
             progress_callback=progress_callback
         )
         
-        # Envoyer les résultats finaux
         await websocket.send_json({
             "type": "completed",
-            "data": results,
+            "data": clean_nan_values(results),
             "timestamp": pd.Timestamp.now().isoformat()
         })
     
@@ -744,14 +1212,9 @@ async def websocket_analyze(websocket: WebSocket, file_id: str):
             pass
 
 
-# ==================== Endpoint Analyse Rapide (Sans Feature Engineering) ====================
-
 @app.post("/api/v1/analyze/quick-eda")
 async def quick_eda(request: AnalyzeRequest):
-    """
-    Analyse rapide: File Structure + EDA (sans Feature Engineering)
-    Plus rapide mais moins complet que run_complete_analysis_pipeline
-    """
+    """Analyse rapide: File Structure + EDA (sans Feature Engineering)"""
     logger.info(f"⚡ Quick EDA: {request.file_id}")
     
     file_path = os.path.join(settings.excel_output_dir, request.file_id)
@@ -760,13 +1223,11 @@ async def quick_eda(request: AnalyzeRequest):
         raise HTTPException(404, "Fichier introuvable.")
     
     try:
-        # Charger
         if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
             df = pd.read_excel(file_path)
         else:
             df = pd.read_csv(file_path)
         
-        # File Structure
         file_stats = {
             "file_id": request.file_id,
             "filename": os.path.basename(file_path),
@@ -781,19 +1242,51 @@ async def quick_eda(request: AnalyzeRequest):
             file_path, df, file_stats
         )
         
-        # EDA direct (sans feature engineering)
         eda_results = await eda_service.run_full_eda(df, {}, request.user_prompt)
         
-        return {
+        return clean_nan_values({
             "success": True,
             "file_id": request.file_id,
             "file_structure": file_structure,
             "eda": eda_results,
             "analysis_type": "quick_eda"
-        }
+        })
     
     except Exception as e:
         logger.error(f"Erreur quick_eda: {e}")
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/v1/smart-analyze/export-pdf")
+async def export_pdf_report(request: AnalyzeRequest):
+    """
+    📄 GÉNÈRE LE RAPPORT PDF PROFESSIONNEL AVEC INTERPRÉTATION DÉCISIONNELLE
+    """
+    logger.info(f"📄 Export PDF demandé pour: {request.file_id}")
+    
+    # 1. Récupération des données d'analyse complètes en cache
+    cached_results = await smart_analytics_orchestrator.get_analysis_results(request.file_id)
+    
+    if not cached_results:
+        raise HTTPException(
+            404, 
+            "Données d'analyse introuvables. Veuillez d'abord exécuter l'analyse intelligente."
+        )
+    
+    try:
+        # 2. Appel au service d'export professionnel
+        export_result = await smart_export_service.generate_professional_report(
+            cached_results, 
+            request.user_prompt
+        )
+        
+        if not export_result["success"]:
+            raise HTTPException(500, export_result["error"])
+            
+        return export_result
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur Export PDF: {e}")
         raise HTTPException(500, str(e))
 
 

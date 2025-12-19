@@ -60,7 +60,8 @@ class EDAService:
             if len(clean_data) < 10:
                 continue
             
-            var_score = clean_data.std() / (clean_data.mean().abs() + 1e-6)
+            
+            var_score = clean_data.std() / (np.abs(clean_data.mean()) + 1e-6)
             skew = clean_data.skew()
             skew_score = 1.0 - min(abs(skew) / 3, 1.0)
             completeness = clean_data.notna().sum() / len(df[col])
